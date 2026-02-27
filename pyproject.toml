@@ -1,0 +1,31 @@
+[project]
+name = "wttorch"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "bing-image-downloader>=1.1.2",
+    "fastapi>=0.133.0",
+    "grad-cam>=1.5.5",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.8",
+    "python-multipart>=0.0.22",
+    "setuptools==80.10.2",
+    "tensorboard>=2.20.0",
+    "torch>=2.10.0",
+    "torchaudio>=2.10.0",
+    "torchvision>=0.25.0",
+    "uuid>=1.30",
+    "uvicorn>=0.41.0",
+]
+
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
