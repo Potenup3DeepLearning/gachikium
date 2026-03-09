@@ -688,61 +688,7 @@ elif st.session_state.page == 'matching':
             if comp:
                 st.write(f"* 양육관 유사도: {comp['양육관_유사도']*100:.0f}%")
                 st.write(f"* 교육관 유사도: {comp['교육관_유사도']*100:.0f}%")
-    # t_col1, t_col2, t_col3 = st.columns(3)
-
-    # for i, col in enumerate([t_col1, t_col2, t_col3]):
-    #     with col:
-    #         # st.image(f"https://via.placeholder.com/150?text=Top{i+2}", use_column_width=True)
-    #         st.write(f"**{top3_others[i]['name']}**")
-    #         st.caption(f"{top3_others[i]['animal_type']} | 일치율 {top3_others[i]['similarity_score']}%")
-    #         if st.button(f"상세보기", key=f"btn_other_{i}"):
-    #             # 백엔드에서 상세 리포트 요청
-    #             partner_name = top3_others[i]['name']
-    #             try:
-    #                 resp = requests.get(
-    #                     f"{API_BASE_URL}/api/matching/{st.session_state.session_id}/partner/{partner_name}"
-    #                 )
-    #                 resp.raise_for_status()
-    #                 data = resp.json()
-    #                 p = data['partner']
-    #                 comp = p['detailed_comparison']
-
-    #                 # st.info를 활용한 깔끔한 정보 출력
-    #                 st.info(f"### 🔍 {p['name']}님 상세 분석")
-    #                 # 가치관 태그와 자녀계획 일치 여부
-    #                 match_icon = "✅" if comp['자녀계획_일치'] else "❌"
-    #                 st.markdown(f"""
-    #                 **성향 태그:** {' '.join(p['tags'])}
-    #                 **자녀계획 일치:** {match_icon}
-                    
-    #                 ---
-    #                 **📊 매칭 디테일**
-    #                 * 육아 적극성: {p['parenting_enthusiasm']*100:.0f}%
-    #                 * 교육 열정: {p['education_passion']*100:.0f}%
-    #                 * 양육관 유사도: {comp['양육관_유사도']*100:.0f}%
-    #                 * 교육관 유사도: {comp['교육관_유사도']*100:.0f}%
-    #                 """)
-    #             except Exception as e:
-    #                 st.error(f"데이터를 가져오는데 실패했습니다.")
-
-    #                 #테스트용
-    #                 p = top3_others[i]
-    #                 comp = p['detailed_comparison']
-    #                 # st.info를 활용한 깔끔한 정보 출력
-    #                 st.info(f"### 🔍 {p['name']}님 상세 분석")
-    #                 # 가치관 태그와 자녀계획 일치 여부
-    #                 match_icon = "✅" if comp['자녀계획_일치'] else "❌"
-    #                 st.markdown(f"""
-    #                 **성향 태그:** {' '.join(p['tags'])}
-    #                 **자녀계획 일치:** {match_icon}
-                    
-    #                 ---
-    #                 **📊 매칭 디테일**
-    #                 * 육아 적극성: {p['parenting_enthusiasm']*100:.0f}%
-    #                 * 교육 열정: {p['education_passion']*100:.0f}%
-    #                 * 양육관 유사도: {comp['양육관_유사도']*100:.0f}%
-    #                 * 교육관 유사도: {comp['교육관_유사도']*100:.0f}%
-    #                 """)
+    
 
     st.write("")
     if st.button("← 처음으로 돌아가기", key="back_to_home"):
