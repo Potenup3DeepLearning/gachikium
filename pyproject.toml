@@ -28,6 +28,7 @@ dependencies = [
     "altair<5",
     "pydantic>=2.12.5",
     "pillow>=12.1.1",
+    "optuna>=4.7.0",
 ]
 
 
