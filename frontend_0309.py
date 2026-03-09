@@ -454,36 +454,48 @@ elif st.session_state.page == 'matching':
     # --- [동물상 분석 실행 (백엔드 API 호출)] ---
     if 'user_animal_result' not in st.session_state:
         with st.spinner('AI가 당신의 사진에서 동물상을 분석하고 있습니다...'):
-            if st.session_state.user_photo is not None:
-                try:
-                    # 사진 바이트 추출
-                    photo_bytes = st.session_state.user_photo.getvalue()
-                    photo_name = st.session_state.user_photo.name
-                    photo_type = st.session_state.user_photo.type
-                    
-                    files = {"photo": (photo_name, photo_bytes, photo_type)}
-                    form_data = {"session_id": st.session_state.session_id}
-                    
-                    resp = requests.post(
+            try:
+                if st.session_state.user_photo is not None:
+                    files = {
+                        "photo": (
+                            st.session_state.user_photo.name,
+                            st.session_state.user_photo.getvalue(),
+                            st.session_state.user_photo.type if st.session_state.user_photo.type else "image/jpeg"
+                        )
+                    }
+                    data = {
+                        "session_id": st.session_state.session_id
+                    }
+
+                    res = requests.post(
                         f"{API_BASE_URL}/api/animal/analyze",
-                        data=form_data,
+                        data=data,
                         files=files,
+                        timeout=60
                     )
-                    resp.raise_for_status()
-                    result = resp.json()
-                    
-                    # 결과 저장 (이모지 포함 이름 + 확률)
+                    res.raise_for_status()
+                    result = res.json()
+
                     st.session_state.user_animal_result = result["animal_type"]
                     st.session_state.user_animal_prob = result["probability"]
-                    
-                except Exception as e:
-                    # 방어 코드
-                    st.session_state.user_animal_result = "❓ 미확인상"
+                    st.session_state.user_animal_class_name = result["class_name"]
+                    st.session_state.user_animal_class_index = result["class_index"]
+                else:
+                    st.session_state.user_animal_result = "미확인상"
                     st.session_state.user_animal_prob = "0%"
-                    st.warning(f"동물상 분석 실패: {e}")
-            else:
-                # 방어 코드
-                st.session_state.user_animal_result = "❓ 미확인상"
+
+            except requests.HTTPError:
+                try:
+                    err = res.json().get("detail", "동물상 분석 중 오류가 발생했습니다.")
+                except Exception:
+                    err = "동물상 분석 중 오류가 발생했습니다."
+                st.error(err)
+                st.session_state.user_animal_result = "미확인상"
+                st.session_state.user_animal_prob = "0%"
+
+            except Exception as e:
+                st.error(f"백엔드 호출 실패: {e}")
+                st.session_state.user_animal_result = "미확인상"
                 st.session_state.user_animal_prob = "0%"
     
     
@@ -671,7 +683,7 @@ elif st.session_state.page == 'matching':
         d_col1, d_col2 = st.columns(2)
         with d_col1:
             
-            st.mark(f"**이름:** {st.session_state.user_name}")
+            st.markdown(f"**이름:** {st.session_state.user_name}")
             
             # 🎯 요청하신 형식: 동물상 : 🦊여우상(83%)
             st.write(f"**동물상 :** {st.session_state.user_animal_result}({st.session_state.user_animal_prob})")
