@@ -813,29 +813,69 @@ class UserCheckResponse(BaseModel):
     message: str
 
 
-# --- 설문 요청 ---
+# --- 설문 요청 (새 데이터 명세) ---
 class SurveyRequest(BaseModel):
     session_id: str
-    q_children: str = Field(
-        ...,
-        description="희망 자녀 수",
-        examples=["딩크(0명)", "1명", "2명", "3명 이상"],
+
+    # 이상형 동물상
+    ideal_type: str = Field(
+        ..., description="이상형 동물상",
+        examples=["강아지상", "고양이상", "토끼상"],
     )
-    q_gender: str = Field(
-        ...,
-        description="선호 자녀 성별 구성",
-        examples=["상관없음", "아들 선호", "딸 선호", "아들/딸 골고루"],
+
+    # Part 1: 자녀 및 가족 계획
+    p_children_count: str = Field(
+        ..., description="희망 자녀 수",
+        examples=["1명", "2명", "3명", "그 이상"],
     )
-    w_family: str = Field(
-        ...,
-        description="가족 계획 매칭 가중치",
-        examples=["무관", "보통", "중요", "매우 중요"],
+    p_children_composition: str = Field(
+        ..., description="희망 자녀 구성",
+        examples=["오직 딸", "오직 아들", "딸 1명, 아들 1명", "되는대로"],
     )
-    responses: List[int] = Field(
-        ...,
-        description="10개 시나리오 응답 (각 1~5점)",
-        min_length=10,
-        max_length=10,
+    p_children_timing: str = Field(
+        ..., description="자녀 갖고 싶은 시기",
+        examples=["결혼 즉시", "결혼 후 1~2년 이내", "결혼 후 3~5년 이내", "경제적 안정 후"],
+    )
+    p_infertility_alternative: str = Field(
+        ..., description="생물학적 출산 어려움 시 대안",
+        examples=["의학적 도움 적극 시도", "입양 고려", "무자녀"],
+    )
+    imp_family_plan: int = Field(
+        ..., ge=1, le=5, description="자녀 계획 및 가족 구성 중요도 (1~5)",
+    )
+
+    # Part 2: 시나리오 10문항 (각 1~5점)
+    sc_toothbrushing: int = Field(..., ge=1, le=5, description="양치 시나리오")
+    sc_bedtime_story: int = Field(..., ge=1, le=5, description="동화책 시나리오")
+    sc_competition_2nd: int = Field(..., ge=1, le=5, description="경쟁/2등 시나리오")
+    sc_talent_education: int = Field(..., ge=1, le=5, description="재능 교육 시나리오")
+    sc_discipline_conflict: int = Field(..., ge=1, le=5, description="훈육 갈등 시나리오")
+    sc_play_vs_chores: int = Field(..., ge=1, le=5, description="놀이 vs 집안일 시나리오")
+    sc_grandparents_help: int = Field(..., ge=1, le=5, description="조부모 도움 시나리오")
+    sc_inlaws_advice: int = Field(..., ge=1, le=5, description="양가 조언 시나리오")
+    sc_rainy_zoo: int = Field(..., ge=1, le=5, description="비오는 동물원 시나리오")
+    sc_education_fund_risk: int = Field(..., ge=1, le=5, description="교육자금/리스크 시나리오")
+
+    # Part 3: 경제 및 가사 분담
+    e_childcare_cost_share: str = Field(
+        ..., description="자녀 교육비/양육비 지출 비중",
+        examples=["노후보단 자녀 교육", "노후 먼저, 남는 예산으로 지원"],
+    )
+    e_parental_leave_burden: str = Field(
+        ..., description="육아 휴직/양육 부담",
+        examples=["경제력 높은 사람 일하고, 한명은 전담 육아", "맞벌이하면서 외부 도움(조부모, 시터)"],
+    )
+    imp_econ_housework: int = Field(
+        ..., ge=1, le=5, description="경제적 지원 및 가사 분담 중요도 (1~5)",
+    )
+
+    # Part 4: 자녀 가치관
+    child_values_open: str = Field(
+        ..., description="자녀 가치관 - 어떤 사람이 되길 바라는가",
+        examples=["경제적 성공, 사회적 지위", "도덕적, 타인 배려", "자신이 좋아하는 일, 행복", "회복탄력성, 생활력 강한 사람"],
+    )
+    imp_child_values: int = Field(
+        ..., ge=1, le=5, description="자녀 가치관 중요도 (1~5)",
     )
 
 
@@ -872,13 +912,19 @@ class MatchingReportResponse(BaseModel):
     top3_others: List[PartnerProfile]
 
 
-# --- 설문 질문 목록 응답 ---
+# --- 설문 질문/선택지 목록 응답 ---
 class SurveyQuestionsResponse(BaseModel):
-    questions: List[str]
-    children_options: List[str]
-    gender_options: List[str]
-    weight_options: List[str]
-    score_range: Dict[str, int]
+    ideal_type_options: List[str]
+    p_children_count_options: List[str]
+    p_children_composition_options: List[str]
+    p_children_timing_options: List[str]
+    p_infertility_alternative_options: List[str]
+    e_childcare_cost_share_options: List[str]
+    e_parental_leave_burden_options: List[str]
+    child_values_open_options: List[str]
+    scenario_questions: List[Dict[str, str]]
+    importance_range: Dict[str, int]
+    scenario_score_range: Dict[str, int]
 
 
 # --- 사이드바 상태 응답 ---
@@ -1098,12 +1144,12 @@ def navigate_page(session_id: str, page: str):
 
 @app.get(
     "/api/survey/questions",
-    response_model=SurveyQuestionsResponse,
+    response_model=SurveyResponse,
     tags=["설문"],
 )
 def get_survey_questions():
 
-    return SurveyQuestionsResponse(
+    return SurveyResponse(
         ideal_type_options=list(ANIMAL_EMOJI_MAP.keys()),
         p_children_count_options=KNOWN_CATEGORIES['p_children_count'],
         p_children_composition_options=KNOWN_CATEGORIES['p_children_composition'] + ['되는대로', '딸 2명, 아들 1명', '아들1 딸2'],
