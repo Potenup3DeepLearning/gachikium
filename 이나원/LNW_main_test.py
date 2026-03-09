@@ -1364,14 +1364,12 @@ async def get_matching_report(session_id: str):
 
     # --- 동물상 분석 결과 객체 ---
     animal_type_str = session["user_animal_result"]
-    class_idx = next(
-        (i for i, m in enumerate(ANIMAL_MAPPING) if m == animal_type_str), -1
-    )
+    class_name = get_animal_class_from_display(animal_type_str)
     animal_analysis = AnimalAnalysisResult(
         animal_type=animal_type_str,
         probability=session["user_animal_prob"],
-        class_name=ANIMAL_CLASSES[class_idx] if class_idx >= 0 else "미확인",
-        class_index=class_idx,
+        class_name=class_name,
+        class_index=-1,
     )
 
     # --- 노트북 알고리즘 기반 매칭: 가치관 유사도 + MBTI + 이상형 매칭 ---
