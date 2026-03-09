@@ -409,6 +409,135 @@ def load_and_preprocess_db():
 # --- 앱 시작 시 전처리 실행 ---
 df_db, df_features, df_mbti, val_sim_df, trait_sim_df = load_and_preprocess_db()
 
+# CSV 저장 경로 (신규 유저 영구 저장용)
+DB_CSV_PATH = None
+for _p in ["./data/저출산_소개팅_설문조사_확장_10000건_v2_합본.csv"]:
+    if os.path.exists(_p):
+        DB_CSV_PATH = _p
+        break
+
+
+def ensure_similarity_matrices():
+    """유사도 매트릭스가 None이면 재계산 (신규 유저 추가 후 호출)"""
+    global val_sim_df, trait_sim_df
+
+    value_cols = [c for c in df_features.columns if c.startswith(('p_', 'e_', 'child_'))]
+    trait_cols = [c for c in df_features.columns if c in TRAIT_COL_NAMES]
+
+    if len(value_cols) > 0:
+        val_matrix = cosine_similarity(df_features[value_cols])
+        val_sim_df = pd.DataFrame(val_matrix, index=df_features.index, columns=df_features.index)
+
+    if len(trait_cols) > 0:
+        trait_matrix = cosine_similarity(df_features[trait_cols])
+        trait_sim_df = pd.DataFrame(trait_matrix, index=df_features.index, columns=df_features.index)
+
+    print(f"✅ 유사도 매트릭스 재계산 완료 ({len(df_features)}명)")
+
+
+def register_new_user(user_name: str, survey_answers: Dict[str, Any],
+                      my_type: str = "") -> bool:
+    """
+    신규 유저의 설문 데이터를:
+    1) 전역 df_db, df_features, df_mbti에 실시간 추가
+    2) 유사도 매트릭스 재계산
+    3) CSV에 영구 저장
+
+    Parameters:
+        user_name: 유저 이름
+        survey_answers: 설문 응답 dict (SurveyRequest 필드 전체)
+        my_type: AI 분석된 동물상 (예: "고양이상"). 없으면 빈 문자열.
+    """
+    global df_db, df_features, df_mbti, val_sim_df, trait_sim_df
+
+    # --- 1) 리네임된 컬럼명으로 행 데이터 구성 ---
+    new_row = {
+        'user_name': user_name,
+        'ideal_type': survey_answers.get('ideal_type', ''),
+        'my_type': my_type if my_type else '',
+        'p_children_count': survey_answers.get('p_children_count', ''),
+        'p_children_composition': survey_answers.get('p_children_composition', ''),
+        'p_children_timing': survey_answers.get('p_children_timing', ''),
+        'p_infertility_alternative': survey_answers.get('p_infertility_alternative', ''),
+        'imp_family_plan': int(survey_answers.get('imp_family_plan', 3)),
+        'sc_toothbrushing': int(survey_answers.get('sc_toothbrushing', 3)),
+        'sc_bedtime_story': int(survey_answers.get('sc_bedtime_story', 3)),
+        'sc_competition_2nd': int(survey_answers.get('sc_competition_2nd', 3)),
+        'sc_talent_education': int(survey_answers.get('sc_talent_education', 3)),
+        'sc_discipline_conflict': int(survey_answers.get('sc_discipline_conflict', 3)),
+        'sc_play_vs_chores': int(survey_answers.get('sc_play_vs_chores', 3)),
+        'sc_grandparents_help': int(survey_answers.get('sc_grandparents_help', 3)),
+        'sc_inlaws_advice': int(survey_answers.get('sc_inlaws_advice', 3)),
+        'sc_rainy_zoo': int(survey_answers.get('sc_rainy_zoo', 3)),
+        'sc_education_fund_risk': int(survey_answers.get('sc_education_fund_risk', 3)),
+        'e_childcare_cost_share': survey_answers.get('e_childcare_cost_share', ''),
+        'e_parental_leave_burden': survey_answers.get('e_parental_leave_burden', ''),
+        'imp_econ_housework': int(survey_answers.get('imp_econ_housework', 3)),
+        'child_values_open': survey_answers.get('child_values_open', ''),
+        'imp_child_values': int(survey_answers.get('imp_child_values', 3)),
+    }
+
+    try:
+        # --- 2) df_db에 추가 ---
+        new_df = pd.DataFrame([new_row])
+        new_df.index = [user_name]
+        df_db = pd.concat([df_db, new_df], ignore_index=False)
+
+        # --- 3) One-Hot 인코딩 (신규 유저 1행) ---
+        onehot_dfs = []
+        for col, categories in KNOWN_CATEGORIES.items():
+            if col in new_df.columns:
+                imp_col = IMPORTANCE_MAPPING.get(col)
+                oh_df = one_hot_with_importance(new_df, col, imp_col, categories)
+                onehot_dfs.append(oh_df)
+        new_onehot = pd.concat(onehot_dfs, axis=1) if onehot_dfs else pd.DataFrame(index=[user_name])
+
+        # --- 4) MBTI 성향 점수 계산 (1행) ---
+        scenario_cols = [c for c in SCENARIO_COL_NAMES if c in new_df.columns]
+        new_traits, new_mbti_letters = calculate_trait_scores(new_df, scenario_cols, MBTI_AXES)
+        new_mbti_letters['childcare_mbti'] = new_mbti_letters.apply(create_mbti_type, axis=1)
+
+        # --- 5) 피처 벡터 합치기 (기존 컬럼에 맞춤) ---
+        new_feature_row = pd.concat([new_onehot, new_traits], axis=1).fillna(0)
+        for col in df_features.columns:
+            if col not in new_feature_row.columns:
+                new_feature_row[col] = 0.0
+        new_feature_row = new_feature_row[df_features.columns]
+
+        # --- 6) 전역 변수에 추가 ---
+        df_features = pd.concat([df_features, new_feature_row])
+        df_mbti = pd.concat([df_mbti, new_mbti_letters])
+
+        # --- 7) 유사도 매트릭스 재계산 ---
+        ensure_similarity_matrices()
+
+        # --- 8) CSV에 영구 저장 ---
+        if DB_CSV_PATH:
+            reverse_rename = {}
+            for old, new in RENAME_MAP.items():
+                reverse_rename[new] = old
+            for old, new in SCENARIO_RENAME.items():
+                reverse_rename[new] = old
+            for old, new in IMPORTANCE_RENAME_RAW.items():
+                reverse_rename[new] = old
+            save_row = new_df.rename(columns=reverse_rename)
+            if 'user_name' in save_row.columns and COL_NAME not in save_row.columns:
+                save_row = save_row.rename(columns={'user_name': COL_NAME})
+            if 'ideal_type' in save_row.columns and COL_IDEAL_TYPE not in save_row.columns:
+                save_row = save_row.rename(columns={'ideal_type': COL_IDEAL_TYPE})
+            if 'my_type' in save_row.columns and COL_ANIMAL not in save_row.columns:
+                save_row = save_row.rename(columns={'my_type': COL_ANIMAL})
+            save_row.to_csv(DB_CSV_PATH, mode='a', header=False, index=False)
+
+        print(f"✅ 신규 유저 '{user_name}' 등록 완료 (DB: {len(df_db)}명, 피처: {len(df_features)}명)")
+        return True
+
+    except Exception as e:
+        print(f"❌ 신규 유저 등록 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 # ==============================================================================
 # --- [추천 알고리즘] ---
 # ==============================================================================
@@ -1316,6 +1445,25 @@ def submit_survey(request: SurveyRequest):
     sessions[session_id]["survey_answers"] = survey_answers
     sessions[session_id]["page"] = "matching"
 
+    # --- 신규 유저: df_features에 추가 + CSV 영구 저장 ---
+    user_name = sessions[session_id].get("user_name", "")
+    if user_name:
+        existing = lookup_partner_from_db(user_name)
+        if existing is None:
+            # 동물상 AI 분석 결과가 세션에 있으면 my_type으로 사용
+            my_type = ""
+            animal_result = sessions[session_id].get("user_animal_result", "")
+            if animal_result and animal_result != "미확인상" and animal_result != "❓ 미확인상":
+                my_type = get_animal_class_from_display(animal_result)
+
+            success = register_new_user(user_name, survey_answers, my_type)
+            if success:
+                print(f"✅ 신규 유저 '{user_name}' 매칭 준비 완료 (my_type={my_type})")
+            else:
+                print(f"⚠️ 신규 유저 '{user_name}' DB 등록 실패")
+        else:
+            print(f"ℹ️ 기존 유저 '{user_name}' 설문 재제출")
+
     return SurveyResponse(
         session_id=session_id,
         message="데이터 전송 완료! 당신과 가장 잘 어울리는 파트너를 찾고 있습니다.",
@@ -1459,15 +1607,15 @@ async def get_matching_report(session_id: str):
 
     session = sessions[session_id]
 
-    if not session["user_name"] or session["user_photo"] is None:
+    if not session["user_name"]:
         raise HTTPException(
             status_code=400,
             detail="매칭 리포트를 생성하려면 먼저 유저 정보를 입력해주세요.",
         )
 
-    # --- 동물상 분석 (아직 분석되지 않은 경우 자동 실행) ---
+    # --- 동물상 분석 (사진이 있고 아직 분석되지 않은 경우에만 실행) ---
     if session["user_animal_result"] is None:
-        if session["user_photo"] is not None:
+        if session.get("user_photo") is not None:
             try:
                 result = predict_animal_from_bytes(session["user_photo"])
                 session["user_animal_result"] = result["animal_type"]
@@ -1484,6 +1632,18 @@ async def get_matching_report(session_id: str):
 
     # --- 유저 프로필 구성 (노트북 알고리즘 기반) ---
     user_name = session["user_name"]
+
+    # --- 신규 유저: 동물상 분석 결과를 df_db의 my_type에 반영 ---
+    animal_type_str = session.get("user_animal_result", "미확인상")
+    if user_name in df_db.index and animal_type_str and animal_type_str != "미확인상":
+        my_type_clean = get_animal_class_from_display(animal_type_str)
+        if 'my_type' in df_db.columns:
+            # df_db에서 해당 유저의 my_type이 비어있으면 업데이트
+            current_my_type = str(df_db.loc[user_name, 'my_type']).strip() if user_name in df_db.index else ""
+            if not current_my_type or current_my_type == 'nan' or current_my_type == '':
+                df_db.loc[user_name, 'my_type'] = my_type_clean
+                print(f"✅ '{user_name}'의 my_type 업데이트: {my_type_clean}")
+
     user_tags = generate_tags(user_name)
     user_parenting = compute_parenting_enthusiasm(user_name)
     user_education = compute_education_passion(user_name)

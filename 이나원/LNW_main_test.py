@@ -344,7 +344,7 @@ def load_and_preprocess_db():
     """
     # 1) CSV 로드
     csv_candidates = [
-        "../data/저출산_소개팅_설문조사_확장_10000건_v2_합본.csv"
+        "./data/저출산_소개팅_설문조사_확장_10000건_v2_합본.csv"
     ]
     df = None
     for path in csv_candidates:
