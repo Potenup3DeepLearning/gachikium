@@ -1,94 +1,68 @@
 import streamlit as st
-import pandas as pd
-import os
-import torch
-import torch.nn as nn
-import torchvision.transforms as transforms
-from torchvision import models
-from PIL import Image
+import requests
+import io
 
 #================================================================================
-# --- [설정 및 데이터 로드] ---
+# --- [설정] ---
 #================================================================================
+
+# FastAPI 백엔드 서버 주소
+API_BASE_URL = "http://localhost:8000"
 
 st.set_page_config(page_title="가치관 매칭 서비스", layout="centered")
 
-# 세션 상태 초기화 (페이지 이동 및 데이터 저장용)
+#================================================================================
+# --- [세션 상태 초기화 (페이지 이동 및 데이터 저장용)] ---
+#================================================================================
 if 'page' not in st.session_state:
-    st.session_state.page = 'home'      # 현재 페이지
+    st.session_state.page = 'home'       # 현재 페이지
 if 'user_name' not in st.session_state:
-    st.session_state.user_name = ""     # 유저 이름
+    st.session_state.user_name = ""      # 유저 이름
 if 'user_photo' not in st.session_state:
-    st.session_state.user_photo = None  # 유저 사진
+    st.session_state.user_photo = None   # 유저 사진 (UploadedFile 객체)
+if 'session_id' not in st.session_state:
+    st.session_state.session_id = None   # 백엔드 세션 ID
 
-# 기존 DB 로드 (전처리된 파일이 있다고 가정)
-@st.cache_data
-def load_db():
-    # 파일이 없으면 빈 데이터프레임 생성 (테스트용)
-    if os.path.exists('data/df_weighted_10k.csv'):
-        return pd.read_csv('data/df_weighted_10k.csv', index_col=0)
-    else:
-        # 테스트를 위해 가짜 데이터 생성
-        return pd.DataFrame(index=['하준우', '김철수', '이영희'])
-
-df_db = load_db()
-
-# 학습 당시 10개 클래스 순서에 맞춰 이모지와 이름을 매핑하세요.
-animal_mapping = [
-    "🐶 강아지상", "🐱 고양이상", "🐰 토끼상", "🦖 공룡상", "🐻 곰상",
-    "🦊 여우상", "🐴 말상", "🐵 원숭이상", "🐭 쥐상", "🐷 돼지상"
-]
 #================================================================================
-# --- [AI 모델 로드 함수] ---
+# --- [백엔드 세션 생성/복원] ---
 #================================================================================
-@st.cache_resource
-def load_animal_model():
-    # 1. 모델 구조 정의 (기존 pth를 만들 때 사용한 클래스 구조와 동일해야 합니다)
-    # 예시: ResNet이나 간단한 CNN 구조라고 가정
-    model = models.resnet18(pretrained=True)
-    num_ftrs = model.fc.in_features
-    model.fc = nn.Linear(num_ftrs, len( ["강아지상", "고양이상", "토끼상", "공룡상", "곰상", "여우상", "말상", "원숭이상", "쥐상", "돼지상"]))
-    
+def ensure_backend_session():
+    """백엔드 세션이 없으면 새로 생성"""
+    if st.session_state.session_id is None:
+        try:
+            resp = requests.post(f"{API_BASE_URL}/api/session")
+            resp.raise_for_status()
+            data = resp.json()
+            st.session_state.session_id = data["session_id"]
+        except Exception as e:
+            st.error(f"⚠️ 백엔드 서버 연결 실패: {e}")
+            # st.stop()
 
-    # 만약 아키텍처가 복잡하다면 해당 클래스 파일을 import 하세요.
-    # model = torch.load('models/animal_model_full.pth') # 전체 저장 방식일 때
-    
-    # state_dict 저장 방식일 때 (권장):
-    # model.load_state_dict(torch.load('models/animal_model.pth', map_location='cpu'))
-    
-    
-     
-    try:
-        model.load_state_dict(torch.load('./models/animalface_resnet18_gradcam.pth', map_location='cpu')) 
-        model.eval()
-        print("✅ 동물상 분석 모델 로드 완료")
-    except Exception as e:
-        print(f"❌ 모델 로드 실패: {e}")
-        
-    return model
+ensure_backend_session()
 
-# --- [이미지 전처리 함수] ---
-def preprocess_image(image_file):
-    img = Image.open(image_file).convert('RGB')
-    # 모델 학습 시 사용했던 이미지 크기와 정규화 값을 넣으세요 (예: 224x224)
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-    return transform(img).unsqueeze(0) # (1, C, H, W)
-
-# 모델 전역 변수화
-animal_model = load_animal_model()
-animal_classes = ["강아지상", "고양이상", "토끼상", "공룡상", "곰상", "여우상", "말상", "원숭이상", "쥐상", "돼지상"]
-
-
+# #================================================================================
+# # --- [학습 당시 10개 클래스 순서에 맞춘 이모지와 이름 매핑] ---
+# #================================================================================
+# animal_mapping = [
+#     "🐶 강아지상", "🐱 고양이상", "🐰 토끼상", "🦖 공룡상", "🐻 곰상",
+#     "🦊 여우상", "🐴 말상", "🐵 원숭이상", "🐭 쥐상", "🐷 돼지상"
+# ]
 
 #================================================================================
 # --- [페이지 네비게이션 로직] ---
 #================================================================================
 def go_to(page_name):
+    """페이지 이동 + 백엔드 동기화"""
     st.session_state.page = page_name
+    # 백엔드에도 페이지 상태 동기화
+    try:
+        requests.post(
+            f"{API_BASE_URL}/api/session/{st.session_state.session_id}/navigate",
+            params={"page": page_name}
+        )
+    except Exception:
+        pass  # 네비게이션 동기화 실패해도 프론트엔드 이동은 진행
+
     # 최신 버전이면 rerun(), 구버전이면 experimental_rerun() 실행
     if hasattr(st, "rerun"):
         st.rerun()
@@ -156,7 +130,7 @@ def render_sidebar():
         if st.session_state.user_name:
             st.write(f"👤 **{st.session_state.user_name}** 님 진행 중")
         
-        # 사진이 업로드되었다면 작게 미리보기 (선택 사항)
+        # # 사진이 업로드되었다면 작게 미리보기 (선택 사항)
         if st.session_state.user_photo:
             st.image(st.session_state.user_photo, caption="분석용 프로필", width=100)
 
@@ -184,16 +158,36 @@ if st.session_state.page == 'home':
         check_clicked = st.button("입력 완료")
         
 
-    # 로직 체크 및 다음 단계 진행
+    # 로직 체크 및 다음 단계 진행 (백엔드 API를 통해 DB 체크)
     if check_clicked:
         if name and photo:
             st.session_state.user_name = name
             st.session_state.user_photo = photo
             
-            # DB 체크 후 '상태'만 표시하고, 실제 이동 버튼은 따로 둡니다.
-            if name in df_db.index:
-                st.session_state.user_exists = True
-            else:
+            # 백엔드 API로 유저 체크 (이름 + 사진 전송 → DB 존재 여부 확인)
+            try:
+                photo_bytes = photo.getvalue()
+                files = {"photo": (photo.name, photo_bytes, photo.type)}
+                form_data = {
+                    "session_id": st.session_state.session_id,
+                    "name": name,
+                }
+                resp = requests.post(
+                    f"{API_BASE_URL}/api/user/check",
+                    data=form_data,
+                    files=files,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                
+                # DB 체크 결과를 세션에 저장
+                if result["user_exists"]:
+                    st.session_state.user_exists = True
+                else:
+                    st.session_state.user_exists = False
+                    
+            except Exception as e:
+                st.error(f"⚠️ 서버 오류: {e}")
                 st.session_state.user_exists = False
         else:
             st.error("이름과 사진을 모두 입력해주세요.")
@@ -203,10 +197,17 @@ if st.session_state.page == 'home':
         if getattr(st.session_state, 'user_exists', False):
             st.info(f"기존 기록이 있습니다. 어떻게 할까요?")
             c1, c2 = st.columns(2)
-            if c1.button("설문 다시 하기"):
-                go_to('survey')
-            if c2.button("기존 데이터로 매칭"):
+            if c1.button("기존 데이터로 매칭"):
+                # 백엔드에도 기존 데이터 매칭 요청
+                try:
+                    requests.post(
+                        f"{API_BASE_URL}/api/matching/{st.session_state.session_id}/existing"
+                    )
+                except Exception:
+                    pass
                 go_to('matching')
+            if c2.button("설문 다시 하기"):
+                go_to('survey')
         else:
             st.success("신규 유저입니다. 설문을 시작해주세요.")
             if st.button("설문 시작하기 ✍️"):
@@ -215,7 +216,7 @@ if st.session_state.page == 'home':
 # --- [2. 설문 화면 (survey) 통합 버전] ---
 elif st.session_state.page == 'survey':
     st.title("📝 가치관 설문조사")
-    st.caption("개인정보 수집 및 이용 동의 안내 : 성함, 가치관 설문 내용 등 개인정보를 수집하여 서비스 제공합니다. 2차 프로젝트 기한 이후 즉시 파기 예정입니다. 귀하는 개인정보 수집 및 이요에 대한 동의를 거부할 권리가 있습니다. 다만, 거부할 경우 설문 참여가 제한됩니다. ")
+    st.write("진지한 만남을 위해 모든 항목에 정성껏 답해주세요.")
 
     with st.container():
         # 전체 설문을 하나의 Form으로 감쌉니다.
@@ -401,34 +402,85 @@ elif st.session_state.page == 'survey':
                     'imp_child_values':imp_child_values
                 }
                 
-                # 성공 메시지와 함께 페이지 이동
-                st.success("데이터 전송 완료! 당신과 가장 잘 어울리는 파트너를 찾고 있습니다.")
-                go_to('matching')
+                # 백엔드 API로 설문 결과 전송
+                try:
+                    payload = {
+                        "session_id": st.session_state.session_id,
+                        "ideal_type": ideal_type,
+                        "p_children_count": p_children_count,
+                        "p_children_composition": p_children_composition,
+                        'p_children_timing' :p_children_timing,
+                        'p_infertility_alternative' :p_infertility_alternative,
+                        'imp_family_plan':imp_family_plan,
+                        'sc_toothbrushing':sc_toothbrushing,
+                        'sc_bedtime_story' :sc_bedtime_story,
+                        'sc_competition_2nd' :sc_competition_2nd,
+                        'sc_talent_education':sc_talent_education,
+                        'sc_discipline_conflict':sc_discipline_conflict,
+                        'sc_play_vs_chores':sc_play_vs_chores,
+                        'sc_grandparents_help':sc_grandparents_help,
+                        'sc_inlaws_advice':sc_inlaws_advice,
+                        'sc_rainy_zoo':sc_rainy_zoo,
+                        'sc_education_fund_risk':sc_education_fund_risk,
+                        'e_childcare_cost_share':e_childcare_cost_share,
+                        'e_parental_leave_burden':e_parental_leave_burden,
+                        'imp_econ_housework':imp_econ_housework,
+                        'child_values_open':child_values_open,
+                        'imp_child_values':imp_child_values
+                    }
+                    print("전송 데이터 확인:", payload)
+                    resp = requests.post(
+                        f"{API_BASE_URL}/api/survey/submit",
+                        json=payload,
+                    )
+                    resp.raise_for_status()
+                    
+                    # 성공 메시지와 함께 페이지 이동
+                    st.success("데이터 전송 완료! 당신과 가장 잘 어울리는 파트너를 찾고 있습니다.")
+                    go_to('matching')
+                    
+                except Exception as e:
+                    st.error(f"⚠️ 설문 제출 실패: {e}")
+                    
+                    #테스트용
+                    go_to('matching')
+            st.markdown("---")
+                
+                
 
 # --- [3. 매칭 화면 (matching) 통합 버전] ---
 elif st.session_state.page == 'matching':
     
-    # --- [동물상 분석 실행] ---
+    # --- [동물상 분석 실행 (백엔드 API 호출)] ---
     if 'user_animal_result' not in st.session_state:
         with st.spinner('AI가 당신의 사진에서 동물상을 분석하고 있습니다...'):
-            if animal_model is not None and st.session_state.user_photo is not None:
-                # 1. 전처리
-                input_tensor = preprocess_image(st.session_state.user_photo)
-                # 2. 추론
-                with torch.no_grad():
-                    outputs = animal_model(input_tensor)
-                   # 1. Softmax로 확률 계산
-                    probs = torch.nn.functional.softmax(outputs, dim=1)
+            if st.session_state.user_photo is not None:
+                try:
+                    # 사진 바이트 추출
+                    photo_bytes = st.session_state.user_photo.getvalue()
+                    photo_name = st.session_state.user_photo.name
+                    photo_type = st.session_state.user_photo.type
                     
-                    # 2. 가장 높은 확률과 인덱스 추출
-                    conf, predicted = torch.max(probs, 1)
+                    files = {"photo": (photo_name, photo_bytes, photo_type)}
+                    form_data = {"session_id": st.session_state.session_id}
                     
-                    result_idx = predicted.item()
-                    probability = conf.item() * 100 # 퍼센트 변환
-
-                    # 3. 결과 저장 (이모지 포함 이름 + 확률)
-                    st.session_state.user_animal_result = animal_mapping[result_idx]
-                    st.session_state.user_animal_prob = f"{probability:.0f}%" # 반올림 정수
+                    resp = requests.post(
+                        f"{API_BASE_URL}/api/animal/analyze",
+                        data=form_data,
+                        files=files,
+                    )
+                    resp.raise_for_status()
+                    result = resp.json()
+                    
+                    # 결과 저장 (이모지 포함 이름 + 확률)
+                    st.session_state.user_animal_result = result["animal_type"]
+                    st.session_state.user_animal_prob = result["probability"]
+                    
+                except Exception as e:
+                    # 방어 코드
+                    st.session_state.user_animal_result = "❓ 미확인상"
+                    st.session_state.user_animal_prob = "0%"
+                    st.warning(f"동물상 분석 실패: {e}")
             else:
                 # 방어 코드
                 st.session_state.user_animal_result = "❓ 미확인상"
@@ -442,135 +494,270 @@ elif st.session_state.page == 'matching':
     st.subheader(f"✨ {st.session_state.user_name}님을 위한 맞춤 분석 결과입니다.")
     st.markdown("---")
 
+    # 매칭 리포트 데이터를 백엔드에서 가져오기
+    matching_data = None
+    with st.spinner('가치관 데이터를 분석하고 최적의 파트너를 찾는 중...'):
+        try:
+            resp = requests.get(
+                f"{API_BASE_URL}/api/matching/{st.session_state.session_id}"
+            )
+            resp.raise_for_status()
+            matching_data = resp.json()
+        except Exception as e:
+            st.error(f"⚠️ 매칭 리포트 로드 실패: {e}")
+
+    if matching_data:
+        best_match = matching_data["best_match"]
+        user_profile = matching_data["user_profile"]
+        top3_others = matching_data["top3_others"]
+    else:
+        # 백엔드 연결 실패 시 Fallback 임시 데이터 (원본과 동일)
+        best_match = {
+            "name": "이서연",
+            "animal_type": "🐱 고양이상",
+            "similarity_score": 94.8,
+            "parenting_enthusiasm": 0.82,
+            "education_passion": 0.45,
+            'tags' : ["#자율성", "#체험학습", "#딩크희망"]
+        }
+        user_profile = {
+            "tags": ["#자율성", "#체험학습",],
+            "parenting_enthusiasm": 0.85,
+            "education_passion": 0.40,
+        }
+        top3_others = [
+            {"name": "김민수",
+            "animal_type": "🐰 토끼상",
+            "similarity_score": 88.2,
+            "parenting_enthusiasm": 0.78,
+            "education_passion": 0.55,
+            "tags": ["#교육열정", "#활동적"],
+            "detailed_comparison": {
+                "자녀계획_일치": True,
+                "양육관_유사도": 0.87,
+                "교육관_유사도": 0.72,
+            }},
+            {"name": "박지혜",
+            "animal_type": "🦊 여우상",
+            "similarity_score": 85.5,
+            "parenting_enthusiasm": 0.75,
+            "education_passion": 0.60,
+            "tags": ["#창의교육", "#독립심"],
+            "detailed_comparison": {
+                "자녀계획_일치": True,
+                "양육관_유사도": 0.83,
+                "교육관_유사도": 0.78,
+            }},
+            {"name": "최진우",
+            "animal_type": "🐻 곰상",
+            "similarity_score": 82.9,
+            "parenting_enthusiasm": 0.80,
+            "education_passion": 0.50,
+            "tags": ["#가정중심", "#안정추구"],
+            "detailed_comparison": {
+                "자녀계획_일치": False,
+                "양육관_유사도": 0.80,
+                "교육관_유사도": 0.68,
+            }},
+        ]
+
+    
+
+    #---------------나와 베스트 상대 ---------------
+
     # 공통 설정
     fixed_height = "250px" # 이모지 박스이므로 높이를 살짝 줄여서 한눈에 들어오게 조절
-
-    # (추후 알고리즘 연동 시 DB에서 가져올 임시 데이터)
-    target_name = "이서연"
-    target_emoji = "🐱" # 실제론 DB에서 가져올 정보
-    similarity_score = 94.8
-    
-    with st.spinner('가치관 데이터를 분석하고 최적의 파트너를 찾는 중...'):
-        import time
-        time.sleep(1) 
 
     # 중앙: 본인 vs 매칭 상대 비교 (Col 2)
     col1, col2 = st.columns(2)
 
     with col1:
-        
         st.markdown(f"#### 👤 나의 프로필")
-
-        # 내 동물상 이모지만 추출 (예: "🐶 강아지상" -> "🐶")
-        my_emoji = st.session_state.user_animal_result.split()[0] if st.session_state.user_animal_result else "👤"
-
         # 구버전 호환: use_column_width=True
-        st.markdown(f"""
-            <div style="
-                background-color: #ffffff;
-                border: 2px solid #1E3A8A;
-                border-radius: 15px;
-                height: {fixed_height};
-                display: flex;
-                flex-direction: column;
-                justify-content: center;
-                align-items: center;
-                margin-bottom: 15px;
-                box-shadow: 0 4px 15px rgba(30, 58, 138, 0.1);
-            ">
-                <div style="font-size: 100px;">{my_emoji}</div>
-                <div style="color: #1E3A8A; font-weight: bold; margin-top: 10px;">나의 분석 타입</div>
-            </div>
-            """, unsafe_allow_html=True)
+        # st.image(st.session_state.user_photo, use_column_width=True)
         
-        st.info(f"**이름:** {st.session_state.user_name}\n\n**동물상 :** {st.session_state.user_animal_result}({st.session_state.user_animal_prob})")
-
         with st.container():
             # 카드 스타일 적용 (이전에 정의한 CSS 클래스 활용)
             st.markdown('<div class="main-card">', unsafe_allow_html=True)
             
-            st.write("**주요 가치관:** #자율성 #체험학습 #딩크희망")
+            st.write(f"**이름:** {st.session_state.user_name}")
+            
+            # 🎯 요청하신 형식: 동물상 : 🦊여우상(83%)
+            st.write(f"**동물상 :** {st.session_state.user_animal_result}({st.session_state.user_animal_prob})")
+            
+            # 주요 가치관 태그 (백엔드에서 받은 데이터 활용)
+            tags_str = " ".join(user_profile.get("tags", ["#자율성"]))
+            st.write(f"**주요 가치관:** {tags_str}")
             
             # ... 나머지 코드
             st.markdown('</div>', unsafe_allow_html=True)
             
             # 간단한 가치관 시각화 (Progress bar 활용)
             st.write("육아 적극성")
-            st.progress(0.85)
+            st.progress(user_profile.get("parenting_enthusiasm", 0.85))
             st.write("교육 열정")
-            st.progress(0.40)
+            st.progress(user_profile.get("education_passion", 0.40))
 
     with col2:
         st.markdown(f"#### 💝 BEST 매칭 파트너")
-        st.markdown(f"""
-            <div style="
-                background-color: #ffffff;
-                border: 2px solid #1E3A8A;
-                border-radius: 15px;
-                height: {fixed_height};
-                display: flex;
-                flex-direction: column;
-                justify-content: center;
-                align-items: center;
-                margin-bottom: 15px;
-                box-shadow: 0 4px 15px rgba(30, 58, 138, 0.1);
-            ">
-                <div style="font-size: 100px;">{target_emoji}</div>
-                <div style="color: #1E3A8A; font-weight: bold; margin-top: 10px;">베스트 매칭 결과</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        st.success(f"**이름:** {target_name}\n\n**동물상 :** 🐱 고양이상(94%)")
+        # st.image("https://via.placeholder.com/300x300.png?text=Partner+Photo", use_column_width=True)
         
         with st.container():
-            
-            st.write("**주요 가치관:** #자율성 #체험학습 #딩크희망")
 
+            st.markdown('<div class="main-card">', unsafe_allow_html=True)
+
+            st.write(f"**이름:** {best_match['name']}")
+            st.write(f"**동물상:** {best_match['animal_type']}")
+            
+            # 주요 가치관 태그 (백엔드에서 받은 데이터 활용)
+            tags_str2 = " ".join(best_match.get("tags", ["#자율성"]))
+            st.write(f"**주요 가치관:** {tags_str2}")
+
+                   
+            st.markdown('</div>', unsafe_allow_html=True)
             # 상대방 수치 (나와 비교되게)
             st.write("육아 적극성")
-            st.progress(0.82)
+            st.progress(best_match.get("parenting_enthusiasm", 0.82))
             st.write("교육 열정")
-            st.progress(0.45)
+            st.progress(best_match.get("education_passion", 0.45))
             
-    st.metric("매칭 일치율", f"{similarity_score}%")
+            
+    st.info(f"{st.session_state.user_name}님과 {best_match['name']}님의 가치관 유사도는 {best_match['similarity_score']}%입니다.")
 
     st.markdown("---")
 
     # 하단: 그외 추천 파트너 TOP 3
-    st.subheader("🔍 또 다른 인연들을 확인해보세요 (TOP 3)")
-    
-    t_col1, t_col2, t_col3 = st.columns(3)
-    
-    others = [
-        {"name": "김민수", "score": 88.2, "animal": "🐰"},
-        {"name": "박지혜", "score": 85.5, "animal": "🦊"},
-        {"name": "최진우", "score": 82.9, "animal": "🐻"}
-    ]
 
-    for i, col in enumerate([t_col1, t_col2, t_col3]):
+    
+    st.subheader("🔍 또 다른 인연들을 확인해보세요 (TOP 3)")
+        # 1. 정보를 표시할 전역 컨테이너를 루프 "위"에 미리 생성합니다.
+    detail_container = st.container()
+    t_col1, t_col2, t_col3 = st.columns(3)
+    # 2. 파트너 카드 배치 (3열)
+    # 1. 상단에 3열 레이아웃 생성
+    t_cols = [t_col1, t_col2, t_col3]
+
+    # 클릭된 파트너의 정보를 담을 변수 초기화
+    selected_partner_data = None
+
+    for i, col in enumerate(t_cols):
         with col:
-            st.markdown(f"""
-                <div style="
-                    background-color: #ffffff;
-                    border: 1px solid #e6e9ef;
-                    border-radius: 10px;
-                    height: 150px;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    font-size: 60px;
-                    margin-bottom: 10px;
-                ">
-                    {others[i]['animal']}
-                </div>
-                """, unsafe_allow_html=True)
-            st.write(f"**{others[i]['name']}**")
-            st.caption(f"일치율 {others[i]['score']}%")
+            st.write(f"**{top3_others[i]['name']}**")
+            st.caption(f"{top3_others[i]['animal_type']} | 일치율 {top3_others[i]['similarity_score']}%")
+            
+            # 버튼은 각 열(카드) 내부에 위치
             if st.button(f"상세보기", key=f"btn_other_{i}"):
-                st.toast(f"{others[i]['name']}님과의 매칭 리포트 생성 중...")
+                partner_name = top3_others[i]['name']
+                try:
+                    resp = requests.get(f"{API_BASE_URL}/api/matching/{st.session_state.session_id}/partner/{partner_name}")
+                    resp.raise_for_status()
+                    data = resp.json()
+                    selected_partner_data = data['partner']
+                except Exception:
+                    # 에러 발생 시 테스트용 데이터 사용
+                    selected_partner_data = top3_others[i]
+
+    # 2. 루프가 끝난 후, 즉 카드 3개가 모두 배치된 아래 지점
+    if selected_partner_data:
+        st.write("---") # 카드와 상세정보 사이 구분선
+        
+        p = selected_partner_data
+        comp = p.get('detailed_comparison', {}) # 데이터 구조 확인
+        
+        # 여기서부터는 전체 너비를 사용합니다.
+        st.info(f"### 🔍 {p['name']}님 상세 분석 리포트")
+        
+        # 상세 정보 안에서만 다시 열을 나눠 가독성을 높일 수 있습니다.
+        d_col1, d_col2 = st.columns(2)
+        with d_col1:
+            
+            st.mark(f"**이름:** {st.session_state.user_name}")
+            
+            # 🎯 요청하신 형식: 동물상 : 🦊여우상(83%)
+            st.write(f"**동물상 :** {st.session_state.user_animal_result}({st.session_state.user_animal_prob})")
+            
+            st.markdown(f"**성향 태그:** {' '.join(p['tags'])}")
+            match_icon = "✅" if comp.get('자녀계획_일치') else "❌"
+            st.markdown(f"**자녀계획 일치:** {match_icon}")
+            
+        with d_col2:
+            st.markdown("**📊 매칭 디테일**")
+            st.write(f"* 육아 적극성: {p['parenting_enthusiasm']*100:.0f}%")
+            st.write(f"* 교육 열정: {p['education_passion']*100:.0f}%")
+            # comp 데이터가 있을 때만 출력
+            if comp:
+                st.write(f"* 양육관 유사도: {comp['양육관_유사도']*100:.0f}%")
+                st.write(f"* 교육관 유사도: {comp['교육관_유사도']*100:.0f}%")
+    # t_col1, t_col2, t_col3 = st.columns(3)
+
+    # for i, col in enumerate([t_col1, t_col2, t_col3]):
+    #     with col:
+    #         # st.image(f"https://via.placeholder.com/150?text=Top{i+2}", use_column_width=True)
+    #         st.write(f"**{top3_others[i]['name']}**")
+    #         st.caption(f"{top3_others[i]['animal_type']} | 일치율 {top3_others[i]['similarity_score']}%")
+    #         if st.button(f"상세보기", key=f"btn_other_{i}"):
+    #             # 백엔드에서 상세 리포트 요청
+    #             partner_name = top3_others[i]['name']
+    #             try:
+    #                 resp = requests.get(
+    #                     f"{API_BASE_URL}/api/matching/{st.session_state.session_id}/partner/{partner_name}"
+    #                 )
+    #                 resp.raise_for_status()
+    #                 data = resp.json()
+    #                 p = data['partner']
+    #                 comp = p['detailed_comparison']
+
+    #                 # st.info를 활용한 깔끔한 정보 출력
+    #                 st.info(f"### 🔍 {p['name']}님 상세 분석")
+    #                 # 가치관 태그와 자녀계획 일치 여부
+    #                 match_icon = "✅" if comp['자녀계획_일치'] else "❌"
+    #                 st.markdown(f"""
+    #                 **성향 태그:** {' '.join(p['tags'])}
+    #                 **자녀계획 일치:** {match_icon}
+                    
+    #                 ---
+    #                 **📊 매칭 디테일**
+    #                 * 육아 적극성: {p['parenting_enthusiasm']*100:.0f}%
+    #                 * 교육 열정: {p['education_passion']*100:.0f}%
+    #                 * 양육관 유사도: {comp['양육관_유사도']*100:.0f}%
+    #                 * 교육관 유사도: {comp['교육관_유사도']*100:.0f}%
+    #                 """)
+    #             except Exception as e:
+    #                 st.error(f"데이터를 가져오는데 실패했습니다.")
+
+    #                 #테스트용
+    #                 p = top3_others[i]
+    #                 comp = p['detailed_comparison']
+    #                 # st.info를 활용한 깔끔한 정보 출력
+    #                 st.info(f"### 🔍 {p['name']}님 상세 분석")
+    #                 # 가치관 태그와 자녀계획 일치 여부
+    #                 match_icon = "✅" if comp['자녀계획_일치'] else "❌"
+    #                 st.markdown(f"""
+    #                 **성향 태그:** {' '.join(p['tags'])}
+    #                 **자녀계획 일치:** {match_icon}
+                    
+    #                 ---
+    #                 **📊 매칭 디테일**
+    #                 * 육아 적극성: {p['parenting_enthusiasm']*100:.0f}%
+    #                 * 교육 열정: {p['education_passion']*100:.0f}%
+    #                 * 양육관 유사도: {comp['양육관_유사도']*100:.0f}%
+    #                 * 교육관 유사도: {comp['교육관_유사도']*100:.0f}%
+    #                 """)
 
     st.write("")
     if st.button("← 처음으로 돌아가기", key="back_to_home"):
+        # 백엔드 세션 초기화 요청
+        try:
+            resp = requests.post(
+                f"{API_BASE_URL}/api/session/{st.session_state.session_id}/reset"
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            # 새 세션 ID로 교체
+            st.session_state.session_id = result["session_id"]
+        except Exception:
+            pass
+        
         # 1. 모든 세션 데이터 삭제 (이름, 사진, 설문 결과 등)
         for key in list(st.session_state.keys()):
             del st.session_state[key]
