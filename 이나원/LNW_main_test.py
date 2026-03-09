@@ -16,6 +16,7 @@ import uuid
 import time
 from typing import List, Optional, Dict, Any
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -53,45 +54,672 @@ app.add_middleware(
 # --- [설정 및 데이터 로드] ---
 # ==============================================================================
 
-# 동물상 매핑 (학습 당시 10개 클래스 순서)
-ANIMAL_MAPPING = [
-    "🐶 강아지상", "🐱 고양이상", "🐰 토끼상", "🦖 공룡상", "🐻 곰상",
-    "🦊 여우상", "🐴 말상", "🐵 원숭이상", "🐭 쥐상", "🐷 돼지상"
-]
-
-ANIMAL_CLASSES = [
+# 동물상 매핑 (AI 모델 ResNet18 학습 당시 10개 클래스 순서 — 모델 추론 전용)
+# 추후 수정 필요
+ANIMAL_MODEL_CLASSES = [
     "강아지상", "고양이상", "토끼상", "공룡상", "곰상",
     "여우상", "말상", "원숭이상", "쥐상", "돼지상"
 ]
+def get_animal_display_name(class_name: str) -> str:
+    """동물상 클래스명 → 이모지 포함 표시명 변환 (ANIMAL_EMOJI_MAP 기반)"""
+    return ANIMAL_EMOJI_MAP.get(class_name, f"❓ {class_name}")
 
-# 10개 시나리오 질문 리스트 (프론트엔드와 동일)
-SURVEY_QUESTIONS = [
-    "1. 아이의 자율성을 위해 위험하지 않다면 지켜보는 편이다.",
-    "2. 교육을 위해 어느 정도의 엄격한 훈육은 필요하다고 생각한다.",
-    "3. 경제적 여유보다 아이와 함께 보내는 시간이 더 중요하다.",
-    "4. 아이의 사교육은 빠를수록 좋다고 생각한다.",
-    "5. 배우자와의 양육 가치관이 다를 때 끝까지 설득하는 편이다.",
-    "6. 조부모님의 양육 도움은 적극적으로 받는 것이 좋다.",
-    "7. 아이의 성적보다는 인성 교육이 최우선이다.",
-    "8. 주말에는 무조건 가족과 야외 활동을 나가야 한다.",
-    "9. 아이에게 스마트폰 노출은 최대한 늦춰야 한다.",
-    "10. 칭찬보다는 객관적인 피드백이 아이 성장에 도움이 된다."
+
+def get_animal_class_from_display(display_name: str) -> str:
+    """이모지 포함 표시명 → 순수 클래스명 역변환"""
+    for raw, emoji_name in ANIMAL_EMOJI_MAP.items():
+        if emoji_name == display_name:
+            return raw
+    # 이모지 없는 경우 그대로 반환
+    return display_name.replace("❓ ", "")
+
+# ==============================================================================
+# --- [DB 컬럼명 상수 및 전처리 설정] ---
+# ==============================================================================
+
+import re
+from sklearn.metrics.pairwise import cosine_similarity
+
+# --- 원본 CSV 컬럼명 (raw) ---
+COL_NAME = "0. 당신의 성함"
+COL_IDEAL_TYPE = "0. 당신의 이상형"
+COL_ANIMAL = "0.1. 나의 동물상"
+COL_CHILDREN_COUNT = "1-1. 희망하는 자녀 수"
+COL_CHILDREN_GENDER = "1-2. 희망하는 자녀 구성"
+COL_CHILDREN_TIMING = "1-3. 자녀 갖고 싶은 시기"
+COL_BIRTH_DIFFICULTY = "1-4. 생물학적 출산이 어려움 발생 시 대안"
+COL_WEIGHT_FAMILY = '"1. 자녀 계획 및 가족 구성 항목"에 대해 중요도 '
+COL_WEIGHT_ECONOMY = '"4. 경제적 지원 및 가사 분담"에 대해 중요도 '
+COL_WEIGHT_VALUES = '"5. 자녀 가치관"에 대해 중요도 '
+COL_EDUCATION_COST = "4-1. 자녀 교육비/양육비 지출 비중"
+COL_PARENTING_ROLE = "4-2. 육아 휴직, 양육 부담"
+COL_CHILD_VALUES = "5-1. 자녀 가치관, 어떤 사람이 되길 바라는가? "
+
+# --- 노트북 Cell 9: 컬럼 리네임 매핑 ---
+RENAME_MAP = {
+    '0. 당신의 성함': 'user_name',
+    '0. 당신의 이상형': 'ideal_type',
+    '0.1. 나의 동물상': 'my_type',
+    '1-1. 희망하는 자녀 수': 'p_children_count',
+    '1-2. 희망하는 자녀 구성': 'p_children_composition',
+    '1-3. 자녀 갖고 싶은 시기': 'p_children_timing',
+    '1-4. 생물학적 출산이 어려움 발생 시 대안': 'p_infertility_alternative',
+    '4-1. 자녀 교육비/양육비 지출 비중': 'e_childcare_cost_share',
+    '4-2. 육아 휴직, 양육 부담': 'e_parental_leave_burden',
+}
+
+# --- 노트북 Cell 13: 컬럼 그룹 정의 ---
+SCENARIO_COL_NAMES = [
+    'sc_toothbrushing', 'sc_bedtime_story', 'sc_competition_2nd',
+    'sc_talent_education', 'sc_discipline_conflict', 'sc_play_vs_chores',
+    'sc_grandparents_help', 'sc_inlaws_advice', 'sc_rainy_zoo',
+    'sc_education_fund_risk',
 ]
 
+IMPORTANCE_COL_NAMES = ['imp_family_plan', 'imp_econ_housework', 'imp_child_values']
 
-# --- DB 로드 함수 ---
-def load_db() -> pd.DataFrame:
-    """기존 DB 로드 (전처리된 CSV 파일)"""
-    csv_path = "data/df_weighted_10k.csv"
-    if os.path.exists(csv_path):
-        return pd.read_csv(csv_path, index_col=0)
+# 10개 시나리오 점수 컬럼 (CSV 내 원본 컬럼명, 리네임 전)
+SURVEY_QUESTIONS = [
+    '아이가 "오늘만 양치 안하고 그냥 자면 안돼요? 라고 칭얼거릴 때 어떻게 하시겠습니까?  ',
+    "평소 밤 9시에 자기로 약속했습니다. 그런데 오늘 아이가 읽고 싶어 하던 동화책 시리즈의 마지막 권을 다 읽고 싶다며 30분만 더 시간을 달라고 합니다.",
+    "경쟁 상황에서의 태도 아이가 운동 경기나 대회에서 아쉽게 2등을 했습니다. 아이는 충분히 잘했다고 기뻐하는데, 당신의 마음속 생각은?",
+    "재능 발견과 교육 아이가 특정 분야(예: 피아노, 운동)에 천재적인 재능을 보입니다. 이때 당신의 교육 방향은?",
+    "두 사람의 훈육 방식이 부딪힐 때, 누구의 의견을 따라야 한다고 생각하시나요?",
+    "한 명은 퇴근 후 아이와 놀아주고, 한 명은 밀린 집안일을 해야 하는 상황입니다.",
+    "맞벌이 상황 등에서 조부모님이 아이를 봐주겠다고 제안하신다면?",
+    '양가 어르신들이 본인의 가치관과 다른 육아 조언(예: "애를 너무 손타게 키운다", "사탕 좀 주면 어떠냐")을 하실 때 당신의 생각은?',
+    "주말에 아이와 동물원에 가기로 했는데, 아침에 일어나니 갑자기 비가 옵니다. 이때 당신의 반응은?",
+    "아이의 교육 자금이나 미래 리스크를 대비하는 당신의 생각은?",
+]
+
+# 원본 컬럼명 → 리네임 매핑 (시나리오)
+SCENARIO_RENAME = dict(zip(SURVEY_QUESTIONS, SCENARIO_COL_NAMES))
+
+# 중요도 컬럼 리네임
+IMPORTANCE_RENAME_RAW = {
+    '"1. 자녀 계획 및 가족 구성 항목"에 대해 중요도 ': 'imp_family_plan',
+    '"4. 경제적 지원 및 가사 분담"에 대해 중요도 ': 'imp_econ_housework',
+    '"5. 자녀 가치관"에 대해 중요도 ': 'imp_child_values',
+    '5-1. 자녀 가치관, 어떤 사람이 되길 바라는가? ': 'child_values_open',
+}
+
+# --- 알려진 카테고리 ---
+KNOWN_CATEGORIES = {
+    'p_children_count': ['1명', '2명', '3명', '그 이상'],
+    'p_children_composition': ['오직 딸', '오직 아들', '딸 1명, 아들 1명'],
+    'p_children_timing': ['결혼 즉시', '결혼 후 1~2년 이내', '결혼 후 3~5년 이내', '경제적 안정 후'],
+    'p_infertility_alternative': ['의학적 도움 적극 시도', '입양 고려', '무자녀'],
+    'e_childcare_cost_share': ['노후보단 자녀 교육', '노후 먼저, 남는 예산으로 지원'],
+    'e_parental_leave_burden': ['경제력 높은 사람 일하고, 한명은 전담 육아', '맞벌이하면서 외부 도움(조부모, 시터)'],
+    'child_values_open': ['경제적 성공, 사회적 지위', '도덕적, 타인 배려', '자신이 좋아하는 일, 행복', '회복탄력성, 생활력 강한 사람'],
+}
+
+# 중요도 매핑 (어떤 범주형 컬럼이 어떤 중요도 컬럼에 가중치를 받는지)
+IMPORTANCE_MAPPING = {
+    'p_children_count': 'imp_family_plan',
+    'p_children_composition': 'imp_family_plan',
+    'p_children_timing': 'imp_family_plan',
+    'p_infertility_alternative': 'imp_family_plan',
+    'e_childcare_cost_share': 'imp_econ_housework',
+    'e_parental_leave_burden': 'imp_econ_housework',
+    'child_values_open': 'imp_child_values',
+}
+
+# --- 노트북 Cell 20: MBTI 5축 정의 ---
+MBTI_AXES = [
+    ("S", "F", "parenting_style_SF"),       # 양육 실행 스타일
+    ("A", "H", "education_priority_AH"),    # 교육/성장 우선순위
+    ("E", "L", "co_parenting_mode_EL"),     # 공동양육 운영 방식
+    ("B", "T", "family_boundary_BT"),       # 확장가족/경계
+    ("P", "G", "planning_risk_PG"),         # 계획/리스크 대응
+]
+
+TRAIT_COL_NAMES = [ax[2] for ax in MBTI_AXES]
+
+# 동물상 이모지 매핑
+ANIMAL_EMOJI_MAP = {
+    "강아지상": "🐶 강아지상", "고양이상": "🐱 고양이상", "토끼상": "🐰 토끼상",
+    "공룡상": "🦖 공룡상", "곰상": "🐻 곰상", "여우상": "🦊 여우상",
+    "말상": "🐴 말상", "원숭이상": "🐵 원숭이상", "쥐상": "🐭 쥐상",
+    "돼지상": "🐷 돼지상", "꽃돼지상": "🐷 꽃돼지상", "늑대상": "🐺 늑대상",
+    "쿼카상": "🐨 쿼카상", "도룡뇽상": "🦎 도룡뇽상", "코알라상": "🐨 코알라상",
+    "꼬부기상": "🐢 꼬부기상", "알파카상": "🦙 알파카상", "사슴상": "🦌 사슴상",
+    "오리상": "🦆 오리상", "햄스터상": "🐹 햄스터상", "너구리상": "🦝 너구리상",
+}
+
+
+# ==============================================================================
+# --- [데이터 전처리 함수 (노트북 Cell 7, 9, 15, 16, 21, 23)] ---
+# ==============================================================================
+
+# 컬럼명 정규화
+def clean_colname(col: str) -> str:
+    col = str(col).strip()
+    col = col.replace("\n", " ").replace("\t", " ")
+    col = re.sub(r"\s+", " ", col)
+    col = col.replace('"', "")
+    return col
+
+# 컬럼 리네임
+def find_and_rename(df: pd.DataFrame, rename_map: dict) -> dict:
+    new_rename = {}
+    for old_name, new_name in rename_map.items():
+        if old_name in df.columns:
+            new_rename[old_name] = new_name
+        else:
+            for col in df.columns:
+                key_parts = old_name.split()[:3]
+                if all(part in col for part in key_parts[:2]):
+                    new_rename[col] = new_name
+                    break
+    return new_rename
+
+
+# 원핫 인코딩 및 가중치 적용
+def one_hot_with_importance(df: pd.DataFrame, col: str,
+                            importance_col: str = None,
+                            known_categories: list = None) -> pd.DataFrame:
+    if col not in df.columns:
+        return pd.DataFrame(index=df.index)
+
+    all_categories = set()
+    for val in df[col].dropna():
+        for item in str(val).split(';'):
+            item = item.strip()
+            if item:
+                all_categories.add(item)
+
+    if known_categories:
+        final_categories = list(known_categories) + ['기타']
     else:
-        # 테스트를 위한 가짜 데이터 생성
-        return pd.DataFrame(index=["하준우", "김철수", "이영희"])
+        final_categories = list(all_categories)
+
+    result = pd.DataFrame(0.0, index=df.index,
+                          columns=[f"{col}_{cat}" for cat in final_categories])
+
+    if importance_col and importance_col in df.columns:
+        weights = df[importance_col].fillna(3).astype(float) / 5.0
+    else:
+        weights = pd.Series(1.0, index=df.index)
+
+    for i in range(len(df)):
+        val = df.iloc[i][col]
+        if pd.isna(val):
+            continue
+        items = [item.strip() for item in str(val).split(';') if item.strip()]
+        n_items = len(items)
+        if n_items == 0:
+            continue
+        weight = float(weights.iloc[i])
+        for item in items:
+            if known_categories and item not in known_categories:
+                col_name = f"{col}_기타"
+            else:
+                col_name = f"{col}_{item}"
+            if col_name in result.columns:
+                result.iloc[i, result.columns.get_loc(col_name)] = weight / n_items
+
+    return result
 
 
-# 앱 시작 시 DB 로드
-df_db = load_db()
+# 시나리오 응답 - MBTI형 성향점수 + 문자 계산
+def calculate_trait_scores(df: pd.DataFrame, scenario_cols: list,
+                           axes: list) -> tuple:
+
+    pairs = list(zip(scenario_cols[0::2], scenario_cols[1::2]))
+
+    trait_scores = {}
+    mbti_letters = {}
+
+    for i, ((col1, col2), (left, right, axis_name)) in enumerate(zip(pairs, axes)):
+        if col1 not in df.columns or col2 not in df.columns:
+            continue
+        v1 = pd.to_numeric(df[col1], errors='coerce').fillna(3).astype(float)
+        v2 = pd.to_numeric(df[col2], errors='coerce').fillna(3).astype(float)
+        total = v1 + v2
+        trait_scores[axis_name] = (total - 2) / 8.0
+
+        def get_letter(x, l=left, r=right):
+            return l if x <= 6 else r
+
+        mbti_letters[axis_name + '_letter'] = total.apply(get_letter)
+
+    return pd.DataFrame(trait_scores, index=df.index), pd.DataFrame(mbti_letters, index=df.index)
+
+# MBTI 생성
+def create_mbti_type(row: pd.Series) -> str:
+    letters = []
+    for val in row:
+        if pd.notna(val):
+            letters.append(str(val))
+    return ''.join(letters)
+
+# MBTI 문자 일치 개수
+def count_mbti_matches(mbti_a: str, mbti_b: str) -> int:
+    if not mbti_a or not mbti_b or len(mbti_a) != 5 or len(mbti_b) != 5:
+        return -1
+    return sum(1 for a, b in zip(mbti_a, mbti_b) if a == b)
+
+
+# 일치 개수에 따라 라벨링
+def get_mbti_similarity_label(match_count: int) -> str:
+    if match_count >= 4:
+        return "유사형"
+    elif 0 <= match_count <= 2:
+        return "보완형"
+    else:
+        return "보통"
+
+# ==============================================================================
+# --- [DB 로드 + 전처리 파이프라인] ---
+# ==============================================================================
+
+def load_and_preprocess_db():
+    """
+    CSV 로드 → 컬럼 정리 → 리네임 → One-Hot 인코딩 → MBTI 성향 점수 계산
+    → 피처 매트릭스 + 유사도 매트릭스를 전역 변수로 반환.
+    """
+    # 1) CSV 로드
+    csv_candidates = [
+        "data/df_weighted_10k.csv",
+        "data/저출산_소개팅_설문조사_확장_10000건_v2_합본.csv",
+        "data/저출산_소개팅_설문조사_시나리오추가_더미확장_10000rows_나의동물상추가.csv",
+    ]
+    df = None
+    for path in csv_candidates:
+        if os.path.exists(path):
+            df = pd.read_csv(path)
+            print(f"✅ DB 로드: {path} ({len(df)}행)")
+            break
+    if df is None:
+        print("❌ CSV 파일을 찾을 수 없습니다.")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    # 2) 컬럼명 정리 (Cell 7)
+    cleaned_cols = [clean_colname(c) for c in df.columns]
+    seen = {}
+    unique_cols = []
+    for c in cleaned_cols:
+        if c in seen:
+            seen[c] += 1
+            unique_cols.append(f"{c}_{seen[c]}")
+        else:
+            seen[c] = 0
+            unique_cols.append(c)
+    df.columns = unique_cols
+
+    # 3) 불필요 컬럼 제거 (Cell 11)
+    drop_cols = ['타임스탬프'] + [c for c in df.columns if 'Unnamed' in c]
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+
+    # 4) 리네임 (Cell 9) — RENAME_MAP + 시나리오 + 중요도 통합
+    full_rename = {}
+    full_rename.update(find_and_rename(df, RENAME_MAP))
+    full_rename.update(find_and_rename(df, SCENARIO_RENAME))
+    full_rename.update(find_and_rename(df, IMPORTANCE_RENAME_RAW))
+    df = df.rename(columns=full_rename)
+
+    # 5) user_name을 인덱스로 설정 (Cell 11)
+    if 'user_name' in df.columns:
+        df.index = df['user_name']
+    df = df.fillna(method='ffill')  # 간단한 결측 처리
+
+    # 6) 원본 df 보관 (동물상, 이상형 등 메타 정보 조회용)
+    df_raw = df.copy()
+
+    # 7) One-Hot 인코딩 (Cell 15, 16)
+    onehot_dfs = []
+    for col, categories in KNOWN_CATEGORIES.items():
+        if col in df.columns:
+            imp_col = IMPORTANCE_MAPPING.get(col)
+            oh_df = one_hot_with_importance(df, col, imp_col, categories)
+            onehot_dfs.append(oh_df)
+    df_onehot = pd.concat(onehot_dfs, axis=1) if onehot_dfs else pd.DataFrame(index=df.index)
+
+    # 8) MBTI 성향 점수 계산 (Cell 21, 23)
+    scenario_cols = [c for c in SCENARIO_COL_NAMES if c in df.columns]
+    df_traits, df_mbti_letters = calculate_trait_scores(df, scenario_cols, MBTI_AXES)
+    df_mbti_letters['childcare_mbti'] = df_mbti_letters.apply(create_mbti_type, axis=1)
+
+    # 9) 피처 매트릭스 합치기 (Cell 27)
+    df_features = pd.concat([df_onehot, df_traits], axis=1).fillna(0)
+
+    # 10) 피처 그룹 정의 (Cell 28)
+    value_cols = [c for c in df_features.columns if c.startswith(('p_', 'e_', 'child_'))]
+    trait_cols = [c for c in df_features.columns if c in TRAIT_COL_NAMES]
+
+    # 11) 유사도 매트릭스 사전 계산 (Cell 32, 35)
+    if len(value_cols) > 0:
+        val_sim_matrix = cosine_similarity(df_features[value_cols])
+        val_sim_df = pd.DataFrame(val_sim_matrix, index=df_features.index, columns=df_features.index)
+    else:
+        val_sim_df = pd.DataFrame(1.0, index=df_features.index, columns=df_features.index)
+
+    if len(trait_cols) > 0:
+        trait_sim_matrix = cosine_similarity(df_features[trait_cols])
+        trait_sim_df = pd.DataFrame(trait_sim_matrix, index=df_features.index, columns=df_features.index)
+    else:
+        trait_sim_df = pd.DataFrame(1.0, index=df_features.index, columns=df_features.index)
+
+    print(f"✅ 전처리 완료: 피처 {df_features.shape[1]}개, 유저 {len(df_features)}명")
+    print(f"   가치관 피처: {len(value_cols)}개, 성향 피처: {len(trait_cols)}개")
+
+    return df_raw, df_features, df_mbti_letters, val_sim_df, trait_sim_df
+
+
+# --- 앱 시작 시 전처리 실행 ---
+df_db, df_features, df_mbti, val_sim_df, trait_sim_df = load_and_preprocess_db()
+
+# ==============================================================================
+# --- [추천 알고리즘] ---
+# ==============================================================================
+
+# 가치관 유사도 기반 추천 목록 생성
+def get_similarity_recommendations(user_name: str, top_n: int = 20) -> pd.DataFrame:
+
+    if df_features.empty or user_name not in df_features.index:
+        return pd.DataFrame()
+
+    user_iloc = df_features.index.get_loc(user_name)
+    # 동명이인 처리: get_loc이 slice나 array를 반환하면 첫 번째 사용
+    if isinstance(user_iloc, slice):
+        user_iloc = user_iloc.start
+    elif isinstance(user_iloc, np.ndarray):
+        user_iloc = int(user_iloc[0])
+
+    recommendations = []
+    for i, other_user in enumerate(df_features.index):
+        if i == user_iloc:
+            continue
+
+        val_score = float(val_sim_df.iloc[user_iloc, i])
+
+        other_mbti = 'N/A'
+        if 'childcare_mbti' in df_mbti.columns and i < len(df_mbti):
+            mbti_val = df_mbti.iloc[i]['childcare_mbti']
+            other_mbti = str(mbti_val) if pd.notna(mbti_val) else 'N/A'
+
+        other_ideal = 'N/A'
+        if 'ideal_type' in df_db.columns and i < len(df_db):
+            ideal_val = df_db.iloc[i]['ideal_type']
+            other_ideal = str(ideal_val) if pd.notna(ideal_val) else 'N/A'
+
+        other_my = 'N/A'
+        if 'my_type' in df_db.columns and i < len(df_db):
+            my_val = df_db.iloc[i]['my_type']
+            other_my = str(my_val) if pd.notna(my_val) else 'N/A'
+
+        recommendations.append({
+            'name': other_user,
+            'value_similarity': round(val_score, 4),
+            'childcare_mbti': other_mbti,
+            'ideal_type': other_ideal,
+            'my_type': other_my,
+            'db_index': i,
+        })
+
+    result_df = pd.DataFrame(recommendations)
+    result_df = result_df.sort_values('value_similarity', ascending=False)
+    result_df = result_df.head(top_n).reset_index(drop=True)
+    result_df.index = result_df.index + 1
+    return result_df
+
+# 유사형/ 보완형 라벨 추가
+def add_mbti_similarity_label(rec_df: pd.DataFrame, target_mbti: str) -> pd.DataFrame:
+
+    if rec_df.empty:
+        return rec_df
+    match_counts = rec_df['childcare_mbti'].apply(
+        lambda x: count_mbti_matches(x, target_mbti)
+    )
+    conditions = [(match_counts >= 4), (match_counts <= 2) & (match_counts >= 0)]
+    choices = ['유사형', '보완형']
+    rec_df['similarity_label'] = np.select(conditions, choices, default='보통')
+    return rec_df
+
+
+# 이상형 외모 매칭 여부 : is_match = (내 동물상 == 상대 이상형) AND (내 이상형 == 상대 동물상)
+def add_appearance_match(rec_df: pd.DataFrame,
+                         user_my_type: str, user_ideal_type: str) -> pd.DataFrame:
+
+    if rec_df.empty:
+        return rec_df
+    rec_df['is_match'] = (
+        (user_my_type == rec_df['ideal_type']) &
+        (user_ideal_type == rec_df['my_type'])
+    )
+    return rec_df
+
+
+# 최종 매칭 결과 생성
+# 그룹 분류 :
+#   - 그룹1 : 이상형 매칭 성공 + MBTI 유사형
+#   - 그룹2 : 이상형 매칭 실패 + MBTI 유사형
+#   - 그룹3 : 이상형 매칭 성공 + MBTI 보완형
+#   - 그룹4 : 이상형 매칭 실패 + MBTI 보완형
+# Returns:
+#        best_match: 최고 추천 1명
+#        top3_others: 추가 추천 3명
+#        all_recommendations: 전체 추천 목록 (상세보기용)
+
+def find_best_matches(user_name: str, user_animal_type: str = None) -> Dict[str, Any]:
+
+    if df_features.empty or user_name not in df_features.index:
+        return {"best_match": None, "top3_others": [], "all_recommendations": pd.DataFrame()}
+
+    # 1) 유사도 기반 추천 목록 생성
+    rec_df = get_similarity_recommendations(user_name, top_n=100)
+    if rec_df.empty:
+        return {"best_match": None, "top3_others": [], "all_recommendations": rec_df}
+
+    # 2) 유저의 MBTI, 동물상, 이상형 조회
+    user_iloc = df_features.index.get_loc(user_name)
+    if isinstance(user_iloc, slice):
+        user_iloc = user_iloc.start
+    elif isinstance(user_iloc, np.ndarray):
+        user_iloc = int(user_iloc[0])
+
+    target_mbti = ''
+    if 'childcare_mbti' in df_mbti.columns and user_iloc < len(df_mbti):
+        target_mbti = str(df_mbti.iloc[user_iloc]['childcare_mbti'])
+
+    target_my = ''
+    if 'my_type' in df_db.columns and user_iloc < len(df_db):
+        target_my = str(df_db.iloc[user_iloc]['my_type'])
+    # AI 분석 동물상이 전달되면 그것을 사용
+    if user_animal_type:
+        # 이모지 제거하여 순수 동물상 텍스트 추출
+        for raw, emoji_name in ANIMAL_EMOJI_MAP.items():
+            if emoji_name == user_animal_type or raw == user_animal_type:
+                target_my = raw
+                break
+
+    target_ideal = ''
+    if 'ideal_type' in df_db.columns and user_iloc < len(df_db):
+        target_ideal = str(df_db.iloc[user_iloc]['ideal_type'])
+
+    # 3) MBTI 유사형/보완형 라벨 추가
+    rec_df = add_mbti_similarity_label(rec_df, target_mbti)
+
+    # 4) 이상형 외모 매칭 추가
+    rec_df = add_appearance_match(rec_df, target_my, target_ideal)
+
+    # 5) 그룹별 추천 후보 추출 (노트북 Cell 52, 53 로직)
+    candidates = []
+
+    # 그룹1: 이상형 매칭 + MBTI 유사형 (최고 우선순위)
+    g1 = rec_df[(rec_df['is_match'] == True) & (rec_df['similarity_label'] == '유사형')]
+    if not g1.empty:
+        candidates.extend(g1.head(2).to_dict('records'))
+
+    # 그룹3: 이상형 매칭 + MBTI 보완형
+    g3 = rec_df[(rec_df['is_match'] == True) & (rec_df['similarity_label'] == '보완형')]
+    if not g3.empty:
+        candidates.extend(g3.head(2).to_dict('records'))
+
+    # 그룹2: 이상형 비매칭 + MBTI 유사형
+    g2 = rec_df[(rec_df['is_match'] == False) & (rec_df['similarity_label'] == '유사형')]
+    if not g2.empty:
+        candidates.extend(g2.head(2).to_dict('records'))
+
+    # 그룹4: 이상형 비매칭 + MBTI 보완형
+    g4 = rec_df[(rec_df['is_match'] == False) & (rec_df['similarity_label'] == '보완형')]
+    if not g4.empty:
+        candidates.extend(g4.head(2).to_dict('records'))
+
+    # 후보가 부족하면 유사도 상위로 채움
+    seen_names = {c['name'] for c in candidates}
+    for _, row in rec_df.iterrows():
+        if len(candidates) >= 4:
+            break
+        if row['name'] not in seen_names:
+            candidates.append(row.to_dict())
+            seen_names.add(row['name'])
+
+    # 6) best_match + top3_others 구성
+    best_match = candidates[0] if candidates else None
+    top3_others = candidates[1:4] if len(candidates) > 1 else []
+
+    return {
+        "best_match": best_match,
+        "top3_others": top3_others,
+        "all_recommendations": rec_df,
+        "user_info": {
+            "mbti": target_mbti,
+            "my_type": target_my,
+            "ideal_type": target_ideal,
+        },
+    }
+
+
+
+# ==============================================================================
+# --- [프로필 구성 유틸리티] ---
+# ==============================================================================
+
+def compute_parenting_enthusiasm(row_or_index) -> float:
+    """육아 적극성 점수 (0~1) - MBTI SF축 + 시나리오 기반"""
+    if isinstance(row_or_index, str):
+        # 이름으로 조회
+        if row_or_index in df_features.index:
+            iloc = df_features.index.get_loc(row_or_index)
+            if isinstance(iloc, (slice, np.ndarray)):
+                iloc = iloc.start if isinstance(iloc, slice) else int(iloc[0])
+            if 'parenting_style_SF' in df_features.columns:
+                return round(float(df_features.iloc[iloc]['parenting_style_SF']), 2)
+        return 0.5
+    # pd.Series인 경우
+    if isinstance(row_or_index, pd.Series):
+        for col in SCENARIO_COL_NAMES[:2] + SCENARIO_COL_NAMES[5:7]:
+            if col in row_or_index.index:
+                vals = [float(row_or_index[c]) for c in [col] if c in row_or_index.index]
+                if vals:
+                    return round(np.mean(vals) / 5.0, 2)
+    return 0.5
+
+
+def compute_education_passion(row_or_index) -> float:
+    """교육 열정 점수 (0~1) - MBTI AH축 기반"""
+    if isinstance(row_or_index, str):
+        if row_or_index in df_features.index:
+            iloc = df_features.index.get_loc(row_or_index)
+            if isinstance(iloc, (slice, np.ndarray)):
+                iloc = iloc.start if isinstance(iloc, slice) else int(iloc[0])
+            if 'education_priority_AH' in df_features.columns:
+                return round(float(df_features.iloc[iloc]['education_priority_AH']), 2)
+        return 0.5
+    return 0.5
+
+
+def generate_tags(name_or_row) -> List[str]:
+    """DB 데이터 기반 가치관 태그 생성"""
+    tags = []
+
+    if isinstance(name_or_row, str):
+        row = lookup_partner_from_db(name_or_row)
+        if row is None:
+            return ["#가치관탐색중"]
+    else:
+        row = name_or_row
+
+    # MBTI 유형 기반 태그
+    if isinstance(name_or_row, str) and name_or_row in df_mbti.index:
+        iloc = df_mbti.index.get_loc(name_or_row)
+        if isinstance(iloc, (slice, np.ndarray)):
+            iloc = iloc.start if isinstance(iloc, slice) else int(iloc[0])
+        mbti = str(df_mbti.iloc[iloc].get('childcare_mbti', ''))
+        if len(mbti) >= 5:
+            mbti_tag_map = {
+                'S': '#엄격양육', 'F': '#유연양육',
+                'A': '#성취중시', 'H': '#행복중시',
+                'E': '#평등육아', 'L': '#주도육아',
+                'B': '#경계설정', 'T': '#가족협력',
+                'P': '#계획형', 'G': '#유연대응',
+            }
+            for ch in mbti:
+                if ch in mbti_tag_map:
+                    tags.append(mbti_tag_map[ch])
+                    if len(tags) >= 3:
+                        break
+
+    # 자녀 계획 태그
+    child_count = str(row.get('p_children_count', row.get(COL_CHILDREN_COUNT, ''))).strip()
+    if "1명" in child_count:
+        tags.append("#외동주의")
+    elif "2명" in child_count:
+        tags.append("#두자녀")
+    elif "3명" in child_count or "그 이상" in child_count:
+        tags.append("#대가족")
+
+    # 교육비 태그
+    cost = str(row.get('e_childcare_cost_share', row.get(COL_EDUCATION_COST, ''))).strip()
+    if "노후보단" in cost:
+        tags.append("#교육우선")
+    elif "노후 먼저" in cost:
+        tags.append("#균형재정")
+
+    return tags[:5] if tags else ["#가치관탐색중"]
+
+
+def build_partner_profile_from_match(match_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """추천 결과 dict를 프론트엔드용 PartnerProfile dict로 변환"""
+    name = match_dict.get('name', '알 수 없음')
+    animal_raw = str(match_dict.get('my_type', '미확인상')).strip()
+    animal_display = ANIMAL_EMOJI_MAP.get(animal_raw, f"❓ {animal_raw}")
+    similarity_pct = round(match_dict.get('value_similarity', 0) * 100, 1)
+    tags = generate_tags(name)
+    parenting = compute_parenting_enthusiasm(name)
+    education = compute_education_passion(name)
+    mbti = match_dict.get('childcare_mbti', 'N/A')
+    label = match_dict.get('similarity_label', '보통')
+    is_match = match_dict.get('is_match', False)
+
+    return {
+        "name": name,
+        "animal_type": animal_display,
+        "similarity_score": similarity_pct,
+        "parenting_enthusiasm": parenting,
+        "education_passion": education,
+        "tags": tags,
+        "childcare_mbti": mbti,
+        "similarity_label": label,
+        "is_appearance_match": bool(is_match),
+    }
+
+
+def lookup_partner_from_db(partner_name: str) -> Optional[pd.Series]:
+    """이름으로 DB에서 파트너 행 조회 (동명이인 시 첫 번째 반환)"""
+    if df_db.empty:
+        return None
+    if 'user_name' in df_db.columns:
+        matches = df_db[df_db['user_name'].astype(str).str.strip() == partner_name.strip()]
+    elif COL_NAME in df_db.columns:
+        matches = df_db[df_db[COL_NAME].astype(str).str.strip() == partner_name.strip()]
+    else:
+        return None
+    if matches.empty:
+        return None
+    return matches.iloc[0]
 
 
 # --- AI 모델 로드 함수 ---
@@ -103,7 +731,7 @@ def load_animal_model():
     """
     model = models.resnet18(pretrained=True)
     num_ftrs = model.fc.in_features
-    model.fc = nn.Linear(num_ftrs, len(ANIMAL_CLASSES))
+    model.fc = nn.Linear(num_ftrs, len(ANIMAL_EMOJI_MAP))   # 확인!
 
     try:
         model.load_state_dict(
@@ -162,6 +790,7 @@ def get_or_create_session(session_id: Optional[str] = None) -> tuple:
         "user_animal_prob": None,
     }
     return new_id, sessions[new_id]
+
 
 
 # ==============================================================================
@@ -473,63 +1102,71 @@ def navigate_page(session_id: str, page: str):
     tags=["설문"],
 )
 def get_survey_questions():
-    """
-    설문 질문 목록 및 선택지 반환.
-    Streamlit 설문 화면의 모든 입력 필드 구성에 대응:
-    - Part 1: 자녀 및 가족 계획 선택지
-    - Part 2: 매칭 가중치 설정 선택지
-    - Part 3: 육아 시나리오 10문항 + 점수 범위
-    """
+
     return SurveyQuestionsResponse(
-        questions=SURVEY_QUESTIONS,
-        children_options=["딩크(0명)", "1명", "2명", "3명 이상"],
-        gender_options=["상관없음", "아들 선호", "딸 선호", "아들/딸 골고루"],
-        weight_options=["무관", "보통", "중요", "매우 중요"],
-        score_range={"min": 1, "max": 5},
+        ideal_type_options=list(ANIMAL_EMOJI_MAP.keys()),
+        p_children_count_options=KNOWN_CATEGORIES['p_children_count'],
+        p_children_composition_options=KNOWN_CATEGORIES['p_children_composition'] + ['되는대로', '딸 2명, 아들 1명', '아들1 딸2'],
+        p_children_timing_options=KNOWN_CATEGORIES['p_children_timing'],
+        p_infertility_alternative_options=KNOWN_CATEGORIES['p_infertility_alternative'],
+        e_childcare_cost_share_options=KNOWN_CATEGORIES['e_childcare_cost_share'],
+        e_parental_leave_burden_options=KNOWN_CATEGORIES['e_parental_leave_burden'],
+        child_values_open_options=KNOWN_CATEGORIES['child_values_open'],
+        scenario_questions=[
+            {"key": "sc_toothbrushing", "text": "아이가 \"오늘만 양치 안하고 그냥 자면 안돼요?\" 라고 칭얼거릴 때 어떻게 하시겠습니까?"},
+            {"key": "sc_bedtime_story", "text": "밤 9시에 자기로 약속했는데, 아이가 동화책 마지막 권을 다 읽고 싶다며 30분만 더 달라고 합니다."},
+            {"key": "sc_competition_2nd", "text": "아이가 대회에서 아쉽게 2등을 했습니다. 아이는 기뻐하는데, 당신의 마음속 생각은?"},
+            {"key": "sc_talent_education", "text": "아이가 특정 분야에 천재적인 재능을 보입니다. 이때 당신의 교육 방향은?"},
+            {"key": "sc_discipline_conflict", "text": "두 사람의 훈육 방식이 부딪힐 때, 누구의 의견을 따라야 한다고 생각하시나요?"},
+            {"key": "sc_play_vs_chores", "text": "한 명은 퇴근 후 아이와 놀아주고, 한 명은 밀린 집안일을 해야 하는 상황입니다."},
+            {"key": "sc_grandparents_help", "text": "맞벌이 상황에서 조부모님이 아이를 봐주겠다고 제안하신다면?"},
+            {"key": "sc_inlaws_advice", "text": "양가 어르신들이 본인의 가치관과 다른 육아 조언을 하실 때 당신의 생각은?"},
+            {"key": "sc_rainy_zoo", "text": "주말에 아이와 동물원에 가기로 했는데, 아침에 갑자기 비가 옵니다. 이때 당신의 반응은?"},
+            {"key": "sc_education_fund_risk", "text": "아이의 교육 자금이나 미래 리스크를 대비하는 당신의 생각은?"},
+        ],
+        importance_range={"min": 1, "max": 5},
+        scenario_score_range={"min": 1, "max": 5},
     )
 
 
 @app.post("/api/survey/submit", response_model=SurveyResponse, tags=["설문"])
 def submit_survey(request: SurveyRequest):
     """
-    설문 결과 제출.
-    Streamlit의 설문 Form 제출 로직에 대응:
-    - Part 1: 희망 자녀 수 (q_children), 선호 성별 (q_gender)
-    - Part 2: 가족 계획 가중치 (w_family)
-    - Part 3: 10개 시나리오 응답 (responses, 각 1~5점)
+    설문 결과 제출 (새 데이터 명세).
+    - 이상형 동물상
+    - Part 1: 자녀 계획 (자녀수, 구성, 시기, 출산대안, 중요도)
+    - Part 2: 시나리오 10문항 (각 1~5점)
+    - Part 3: 경제/가사 분담 (교육비, 양육부담, 중요도)
+    - Part 4: 자녀 가치관 (가치관, 중요도)
     - 세션에 설문 결과 저장 후 매칭 페이지로 전환
     """
     session_id = request.session_id
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
 
-    # 선택지 유효성 검증
-    valid_children = {"딩크(0명)", "1명", "2명", "3명 이상"}
-    if request.q_children not in valid_children:
-        raise HTTPException(status_code=400, detail="유효하지 않은 자녀 수 선택입니다.")
-
-    valid_genders = {"상관없음", "아들 선호", "딸 선호", "아들/딸 골고루"}
-    if request.q_gender not in valid_genders:
-        raise HTTPException(status_code=400, detail="유효하지 않은 성별 선호 선택입니다.")
-
-    valid_weights = {"무관", "보통", "중요", "매우 중요"}
-    if request.w_family not in valid_weights:
-        raise HTTPException(status_code=400, detail="유효하지 않은 가중치 선택입니다.")
-
-    # 시나리오 점수 유효성 검증 (각 1~5)
-    for i, score in enumerate(request.responses):
-        if score < 1 or score > 5:
-            raise HTTPException(
-                status_code=400,
-                detail=f"시나리오 {i+1}번 점수가 유효하지 않습니다. (1~5 사이 값 필요)",
-            )
-
-    # 세션에 설문 결과 저장
+    # 세션에 설문 결과 저장 (새 명세 필드 전체)
     survey_answers = {
-        "q_children": request.q_children,
-        "q_gender": request.q_gender,
-        "w_family": request.w_family,
-        "responses": request.responses,
+        "ideal_type": request.ideal_type,
+        "p_children_count": request.p_children_count,
+        "p_children_composition": request.p_children_composition,
+        "p_children_timing": request.p_children_timing,
+        "p_infertility_alternative": request.p_infertility_alternative,
+        "imp_family_plan": request.imp_family_plan,
+        "sc_toothbrushing": request.sc_toothbrushing,
+        "sc_bedtime_story": request.sc_bedtime_story,
+        "sc_competition_2nd": request.sc_competition_2nd,
+        "sc_talent_education": request.sc_talent_education,
+        "sc_discipline_conflict": request.sc_discipline_conflict,
+        "sc_play_vs_chores": request.sc_play_vs_chores,
+        "sc_grandparents_help": request.sc_grandparents_help,
+        "sc_inlaws_advice": request.sc_inlaws_advice,
+        "sc_rainy_zoo": request.sc_rainy_zoo,
+        "sc_education_fund_risk": request.sc_education_fund_risk,
+        "e_childcare_cost_share": request.e_childcare_cost_share,
+        "e_parental_leave_burden": request.e_parental_leave_burden,
+        "imp_econ_housework": request.imp_econ_housework,
+        "child_values_open": request.child_values_open,
+        "imp_child_values": request.imp_child_values,
     }
     sessions[session_id]["survey_answers"] = survey_answers
     sessions[session_id]["page"] = "matching"
@@ -572,18 +1209,15 @@ async def analyze_animal(
     # 이미 분석 결과가 있으면 캐싱된 결과 반환
     # (Streamlit의 `if 'user_animal_result' not in st.session_state:` 에 대응)
     if session["user_animal_result"] is not None:
-        # 캐싱된 결과에서 클래스 인덱스 복원
+        # 캐싱된 결과에서 클래스명 복원
         cached_type = session["user_animal_result"]
         cached_prob = session["user_animal_prob"]
-        class_idx = next(
-            (i for i, m in enumerate(ANIMAL_MAPPING) if m == cached_type), -1
-        )
-        class_name = ANIMAL_CLASSES[class_idx] if class_idx >= 0 else "미확인"
+        class_name = get_animal_class_from_display(cached_type)
         return AnimalAnalysisResult(
             animal_type=cached_type,
             probability=cached_prob,
             class_name=class_name,
-            class_index=class_idx,
+            class_index=-1,
         )
 
     # 사진 데이터 결정 (새 업로드 > 세션 저장 사진)
@@ -627,7 +1261,7 @@ async def analyze_animal(
             probability = conf.item() * 100  # 퍼센트 변환
 
             # 3. 결과 저장 (이모지 포함 이름 + 확률)
-            animal_type = ANIMAL_MAPPING[result_idx]
+            animal_type = ANIMAL_MODEL_CLASSES[result_idx]
             prob_str = f"{probability:.0f}%"
 
             session["user_animal_result"] = animal_type
@@ -636,7 +1270,7 @@ async def analyze_animal(
             return AnimalAnalysisResult(
                 animal_type=animal_type,
                 probability=prob_str,
-                class_name=ANIMAL_CLASSES[result_idx],
+                class_name=class_name,
                 class_index=result_idx,
             )
 
@@ -695,7 +1329,7 @@ async def get_matching_report(session_id: str):
                     result_idx = predicted.item()
                     probability = conf.item() * 100
 
-                    session["user_animal_result"] = ANIMAL_MAPPING[result_idx]
+                    session["user_animal_result"] = get_animal_display_name(ANIMAL_MODEL_CLASSES[result_idx])
                     session["user_animal_prob"] = f"{probability:.0f}%"
             except Exception:
                 session["user_animal_result"] = "❓ 미확인상"
@@ -704,14 +1338,28 @@ async def get_matching_report(session_id: str):
             session["user_animal_result"] = "❓ 미확인상"
             session["user_animal_prob"] = "0%"
 
-    # --- 유저 프로필 구성 ---
+    # --- 유저 프로필 구성 (노트북 알고리즘 기반) ---
+    user_name = session["user_name"]
+    user_tags = generate_tags(user_name)
+    user_parenting = compute_parenting_enthusiasm(user_name)
+    user_education = compute_education_passion(user_name)
+
+    # 유저의 MBTI 조회
+    user_mbti = ""
+    if user_name in df_mbti.index:
+        iloc = df_mbti.index.get_loc(user_name)
+        if isinstance(iloc, (slice, np.ndarray)):
+            iloc = iloc.start if isinstance(iloc, slice) else int(iloc[0])
+        user_mbti = str(df_mbti.iloc[iloc].get('childcare_mbti', ''))
+
     user_profile = {
-        "name": session["user_name"],
+        "name": user_name,
         "animal_type": session["user_animal_result"],
         "animal_probability": session["user_animal_prob"],
-        "tags": ["#자율성", "#체험학습", "#딩크희망"],  # 실제로는 설문 결과 기반으로 생성
-        "parenting_enthusiasm": 0.85,  # 실제로는 설문 결과 기반으로 계산
-        "education_passion": 0.40,     # 실제로는 설문 결과 기반으로 계산
+        "tags": user_tags,
+        "parenting_enthusiasm": user_parenting,
+        "education_passion": user_education,
+        "childcare_mbti": user_mbti,
     }
 
     # --- 동물상 분석 결과 객체 ---
@@ -726,43 +1374,31 @@ async def get_matching_report(session_id: str):
         class_index=class_idx,
     )
 
-    # --- BEST 매칭 파트너 (Streamlit의 임시 데이터와 동일) ---
-    best_match = PartnerProfile(
-        name="이서연",
-        animal_type="🐱 고양이상",
-        similarity_score=94.8,
-        parenting_enthusiasm=0.82,
-        education_passion=0.45,
-        tags=["#소통중시", "#자연육아", "#균형잡힌"],
+    # --- 노트북 알고리즘 기반 매칭: 가치관 유사도 + MBTI + 이상형 매칭 ---
+    match_result = find_best_matches(
+        user_name=user_name,
+        user_animal_type=session.get("user_animal_result"),
     )
 
-    # --- TOP 3 추가 추천 파트너 (Streamlit의 others 리스트와 동일) ---
-    top3_others = [
-        PartnerProfile(
-            name="김민수",
-            animal_type="🐰 토끼상",
-            similarity_score=88.2,
-            parenting_enthusiasm=0.78,
-            education_passion=0.55,
-            tags=["#교육열정", "#활동적"],
-        ),
-        PartnerProfile(
-            name="박지혜",
-            animal_type="🦊 여우상",
-            similarity_score=85.5,
-            parenting_enthusiasm=0.75,
-            education_passion=0.60,
-            tags=["#창의교육", "#독립심"],
-        ),
-        PartnerProfile(
-            name="최진우",
-            animal_type="🐻 곰상",
-            similarity_score=82.9,
-            parenting_enthusiasm=0.80,
-            education_passion=0.50,
-            tags=["#가정중심", "#안정추구"],
-        ),
-    ]
+    if match_result["best_match"]:
+        best_profile = build_partner_profile_from_match(match_result["best_match"])
+        best_match = PartnerProfile(**{k: v for k, v in best_profile.items()
+                                       if k in PartnerProfile.model_fields})
+    else:
+        best_match = PartnerProfile(
+            name="매칭 대상 없음",
+            animal_type="❓ 미확인상",
+            similarity_score=0.0,
+            parenting_enthusiasm=0.0,
+            education_passion=0.0,
+            tags=["#데이터없음"],
+        )
+
+    top3_others = []
+    for m in match_result.get("top3_others", []):
+        profile = build_partner_profile_from_match(m)
+        top3_others.append(PartnerProfile(**{k: v for k, v in profile.items()
+                                              if k in PartnerProfile.model_fields}))
 
     # 페이지 상태 업데이트
     session["page"] = "matching"
@@ -814,77 +1450,110 @@ def match_with_existing_data(session_id: str):
 def get_partner_detail(session_id: str, partner_name: str):
     """
     추천 파트너 상세 리포트 조회.
-    Streamlit의 '상세보기' 버튼에 대응:
-    - st.toast(f"{others[i]['name']}님의 상세 리포트를 생성합니다.")
+    노트북 알고리즘 기반: 가치관 유사도, MBTI 비교, 이상형 매칭 정보 포함.
     """
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
 
-    # 임시 상세 데이터 (실제로는 DB에서 조회)
-    partner_details = {
-        "김민수": {
-            "name": "김민수",
-            "animal_type": "🐰 토끼상",
-            "similarity_score": 88.2,
-            "parenting_enthusiasm": 0.78,
-            "education_passion": 0.55,
-            "tags": ["#교육열정", "#활동적"],
-            "detailed_comparison": {
-                "자녀계획_일치": True,
-                "양육관_유사도": 0.87,
-                "교육관_유사도": 0.72,
-            },
-        },
-        "박지혜": {
-            "name": "박지혜",
-            "animal_type": "🦊 여우상",
-            "similarity_score": 85.5,
-            "parenting_enthusiasm": 0.75,
-            "education_passion": 0.60,
-            "tags": ["#창의교육", "#독립심"],
-            "detailed_comparison": {
-                "자녀계획_일치": True,
-                "양육관_유사도": 0.83,
-                "교육관_유사도": 0.78,
-            },
-        },
-        "최진우": {
-            "name": "최진우",
-            "animal_type": "🐻 곰상",
-            "similarity_score": 82.9,
-            "parenting_enthusiasm": 0.80,
-            "education_passion": 0.50,
-            "tags": ["#가정중심", "#안정추구"],
-            "detailed_comparison": {
-                "자녀계획_일치": False,
-                "양육관_유사도": 0.80,
-                "교육관_유사도": 0.68,
-            },
-        },
-        "이서연": {
-            "name": "이서연",
-            "animal_type": "🐱 고양이상",
-            "similarity_score": 94.8,
-            "parenting_enthusiasm": 0.82,
-            "education_passion": 0.45,
-            "tags": ["#소통중시", "#자연육아", "#균형잡힌"],
-            "detailed_comparison": {
-                "자녀계획_일치": True,
-                "양육관_유사도": 0.92,
-                "교육관_유사도": 0.85,
-            },
-        },
-    }
+    session = sessions[session_id]
+    user_name = session.get("user_name", "")
 
-    if partner_name not in partner_details:
+    # --- DB에서 파트너 조회 ---
+    partner_row = lookup_partner_from_db(partner_name)
+    if partner_row is None:
         raise HTTPException(
             status_code=404,
             detail=f"'{partner_name}'님의 데이터를 찾을 수 없습니다.",
         )
 
+    # --- 가치관 유사도 (사전 계산된 매트릭스에서 조회) ---
+    val_similarity = 0.0
+    if user_name in val_sim_df.index and partner_name in val_sim_df.columns:
+        user_iloc = val_sim_df.index.get_loc(user_name)
+        partner_iloc = val_sim_df.columns.get_loc(partner_name)
+        if isinstance(user_iloc, (slice, np.ndarray)):
+            user_iloc = user_iloc.start if isinstance(user_iloc, slice) else int(user_iloc[0])
+        if isinstance(partner_iloc, (slice, np.ndarray)):
+            partner_iloc = partner_iloc.start if isinstance(partner_iloc, slice) else int(partner_iloc[0])
+        val_similarity = float(val_sim_df.iloc[user_iloc, partner_iloc])
+
+    # --- MBTI 비교 ---
+    user_mbti = ""
+    partner_mbti = ""
+    if user_name in df_mbti.index:
+        u_iloc = df_mbti.index.get_loc(user_name)
+        if isinstance(u_iloc, (slice, np.ndarray)):
+            u_iloc = u_iloc.start if isinstance(u_iloc, slice) else int(u_iloc[0])
+        user_mbti = str(df_mbti.iloc[u_iloc].get('childcare_mbti', ''))
+    if partner_name in df_mbti.index:
+        p_iloc = df_mbti.index.get_loc(partner_name)
+        if isinstance(p_iloc, (slice, np.ndarray)):
+            p_iloc = p_iloc.start if isinstance(p_iloc, slice) else int(p_iloc[0])
+        partner_mbti = str(df_mbti.iloc[p_iloc].get('childcare_mbti', ''))
+
+    mbti_match_count = count_mbti_matches(user_mbti, partner_mbti)
+    mbti_label = get_mbti_similarity_label(mbti_match_count)
+
+    # --- 이상형 매칭 ---
+    user_my_type = ""
+    user_ideal_type = ""
+    partner_my_type = str(partner_row.get('my_type', partner_row.get(COL_ANIMAL, ''))).strip()
+    partner_ideal_type = str(partner_row.get('ideal_type', partner_row.get(COL_IDEAL_TYPE, ''))).strip()
+
+    if user_name in df_db.index:
+        u_iloc = df_db.index.get_loc(user_name)
+        if isinstance(u_iloc, (slice, np.ndarray)):
+            u_iloc = u_iloc.start if isinstance(u_iloc, slice) else int(u_iloc[0])
+        user_my_type = str(df_db.iloc[u_iloc].get('my_type', '')).strip()
+        user_ideal_type = str(df_db.iloc[u_iloc].get('ideal_type', '')).strip()
+
+    is_appearance_match = (user_my_type == partner_ideal_type) and (user_ideal_type == partner_my_type)
+
+    # --- 프로필 구성 ---
+    animal_display = ANIMAL_EMOJI_MAP.get(partner_my_type, f"❓ {partner_my_type}")
+    tags = generate_tags(partner_name)
+    parenting = compute_parenting_enthusiasm(partner_name)
+    education = compute_education_passion(partner_name)
+
+    # --- 원본 데이터 ---
+    partner_detail_data = {
+        "name": partner_name,
+        "animal_type": animal_display,
+        "similarity_score": round(val_similarity * 100, 1),
+        "parenting_enthusiasm": parenting,
+        "education_passion": education,
+        "tags": tags,
+        "childcare_mbti": partner_mbti,
+        "similarity_label": mbti_label,
+        "is_appearance_match": is_appearance_match,
+        "detailed_comparison": {
+            "가치관_유사도": round(val_similarity, 4),
+            "MBTI_일치수": mbti_match_count,
+            "MBTI_유형": mbti_label,
+            "이상형_매칭": is_appearance_match,
+        },
+        "raw_info": {
+            "희망자녀수": str(partner_row.get('p_children_count', partner_row.get(COL_CHILDREN_COUNT, ''))),
+            "희망자녀구성": str(partner_row.get('p_children_composition', partner_row.get(COL_CHILDREN_GENDER, ''))),
+            "자녀시기": str(partner_row.get('p_children_timing', partner_row.get(COL_CHILDREN_TIMING, ''))),
+            "출산대안": str(partner_row.get('p_infertility_alternative', partner_row.get(COL_BIRTH_DIFFICULTY, ''))),
+            "교육비관점": str(partner_row.get('e_childcare_cost_share', partner_row.get(COL_EDUCATION_COST, ''))),
+            "양육분담": str(partner_row.get('e_parental_leave_burden', partner_row.get(COL_PARENTING_ROLE, ''))),
+            "자녀가치관": str(partner_row.get('child_values_open', partner_row.get(COL_CHILD_VALUES, ''))),
+            "이상형": partner_ideal_type,
+            "동물상": partner_my_type,
+        },
+        "user_comparison": {
+            "user_mbti": user_mbti,
+            "partner_mbti": partner_mbti,
+            "user_my_type": user_my_type,
+            "user_ideal_type": user_ideal_type,
+        },
+    }
+
     return {
         "session_id": session_id,
-        "partner": partner_details[partner_name],
+        "partner": partner_detail_data,
         "message": f"{partner_name}님의 상세 리포트를 생성합니다.",
     }
 
@@ -901,9 +1570,9 @@ def get_db_info():
     """
     return {
         "total_users": len(df_db),
-        "user_names": df_db.index.tolist()[:20],  # 최대 20명까지만 반환 (보안)
+        "user_names": df_db['user_name'].tolist()[:20] if 'user_name' in df_db.columns else (df_db[COL_NAME].tolist()[:20] if COL_NAME in df_db.columns else []),
         "columns": df_db.columns.tolist(),
-        "db_file_exists": os.path.exists("data/df_weighted_10k.csv"),
+        "db_file_exists": os.path.exists("data/df_weighted_10k.csv") or os.path.exists("data/저출산_소개팅_설문조사_확장_10000건_v2_합본.csv"),
     }
 
 
@@ -918,9 +1587,10 @@ def get_animal_mapping():
     프론트엔드에서 동물상 표시에 필요한 전체 매핑 목록.
     """
     return {
-        "animal_mapping": ANIMAL_MAPPING,
-        "animal_classes": ANIMAL_CLASSES,
-        "total_classes": len(ANIMAL_CLASSES),
+        "animal_emoji_map": ANIMAL_EMOJI_MAP,
+        "animal_model_classes": ANIMAL_MODEL_CLASSES,
+        "all_animal_types": list(ANIMAL_EMOJI_MAP.keys()),
+        "total_types": len(ANIMAL_EMOJI_MAP),
     }
 
 
