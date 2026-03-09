@@ -118,8 +118,8 @@ SCENARIO_COL_NAMES = [
 
 IMPORTANCE_COL_NAMES = ['imp_family_plan', 'imp_econ_housework', 'imp_child_values']
 
-# 10개 시나리오 점수 컬럼 (CSV 내 원본 컬럼명, 리네임 전)
-SURVEY_QUESTIONS = [
+# 10개 시나리오 점수 컬럼 — 원본(따옴표 포함) + cleaned(따옴표 제거) 양쪽 대응
+SCENARIO_COLUMNS_RAW = [
     '아이가 "오늘만 양치 안하고 그냥 자면 안돼요? 라고 칭얼거릴 때 어떻게 하시겠습니까?  ',
     "평소 밤 9시에 자기로 약속했습니다. 그런데 오늘 아이가 읽고 싶어 하던 동화책 시리즈의 마지막 권을 다 읽고 싶다며 30분만 더 시간을 달라고 합니다.",
     "경쟁 상황에서의 태도 아이가 운동 경기나 대회에서 아쉽게 2등을 했습니다. 아이는 충분히 잘했다고 기뻐하는데, 당신의 마음속 생각은?",
@@ -132,18 +132,41 @@ SURVEY_QUESTIONS = [
     "아이의 교육 자금이나 미래 리스크를 대비하는 당신의 생각은?",
 ]
 
-# 원본 컬럼명 → 리네임 매핑 (시나리오)
-SCENARIO_RENAME = dict(zip(SURVEY_QUESTIONS, SCENARIO_COL_NAMES))
+# cleaned 후 달라지는 컬럼명 (따옴표 제거됨)
+SCENARIO_COLUMNS_CLEANED = [
+    "아이가 오늘만 양치 안하고 그냥 자면 안돼요? 라고 칭얼거릴 때 어떻게 하시겠습니까?",
+    "평소 밤 9시에 자기로 약속했습니다. 그런데 오늘 아이가 읽고 싶어 하던 동화책 시리즈의 마지막 권을 다 읽고 싶다며 30분만 더 시간을 달라고 합니다.",
+    "경쟁 상황에서의 태도 아이가 운동 경기나 대회에서 아쉽게 2등을 했습니다. 아이는 충분히 잘했다고 기뻐하는데, 당신의 마음속 생각은?",
+    "재능 발견과 교육 아이가 특정 분야(예: 피아노, 운동)에 천재적인 재능을 보입니다. 이때 당신의 교육 방향은?",
+    "두 사람의 훈육 방식이 부딪힐 때, 누구의 의견을 따라야 한다고 생각하시나요?",
+    "한 명은 퇴근 후 아이와 놀아주고, 한 명은 밀린 집안일을 해야 하는 상황입니다.",
+    "맞벌이 상황 등에서 조부모님이 아이를 봐주겠다고 제안하신다면?",
+    "양가 어르신들이 본인의 가치관과 다른 육아 조언(예: 애를 너무 손타게 키운다, 사탕 좀 주면 어떠냐)을 하실 때 당신의 생각은?",
+    "주말에 아이와 동물원에 가기로 했는데, 아침에 일어나니 갑자기 비가 옵니다. 이때 당신의 반응은?",
+    "아이의 교육 자금이나 미래 리스크를 대비하는 당신의 생각은?",
+]
 
-# 중요도 컬럼 리네임
+# 원본 + cleaned 양쪽 모두 리네임 가능하도록 매핑 통합
+SCENARIO_RENAME = {}
+for raw, cleaned, renamed in zip(SCENARIO_COLUMNS_RAW, SCENARIO_COLUMNS_CLEANED, SCENARIO_COL_NAMES):
+    SCENARIO_RENAME[raw] = renamed
+    SCENARIO_RENAME[cleaned] = renamed
+
+# 중요도 컬럼 리네임 — 원본(따옴표 포함) + cleaned(따옴표 제거) 양쪽 대응
 IMPORTANCE_RENAME_RAW = {
+    # 원본 (따옴표 포함)
     '"1. 자녀 계획 및 가족 구성 항목"에 대해 중요도 ': 'imp_family_plan',
     '"4. 경제적 지원 및 가사 분담"에 대해 중요도 ': 'imp_econ_housework',
     '"5. 자녀 가치관"에 대해 중요도 ': 'imp_child_values',
     '5-1. 자녀 가치관, 어떤 사람이 되길 바라는가? ': 'child_values_open',
+    # cleaned 후 (따옴표 제거됨)
+    '1. 자녀 계획 및 가족 구성 항목에 대해 중요도': 'imp_family_plan',
+    '4. 경제적 지원 및 가사 분담에 대해 중요도': 'imp_econ_housework',
+    '5. 자녀 가치관에 대해 중요도': 'imp_child_values',
+    '5-1. 자녀 가치관, 어떤 사람이 되길 바라는가?': 'child_values_open',
 }
 
-# --- 알려진 카테고리 ---
+# --- 노트북 Cell 16: 알려진 카테고리 ---
 KNOWN_CATEGORIES = {
     'p_children_count': ['1명', '2명', '3명', '그 이상'],
     'p_children_composition': ['오직 딸', '오직 아들', '딸 1명, 아들 1명'],
@@ -321,9 +344,7 @@ def load_and_preprocess_db():
     """
     # 1) CSV 로드
     csv_candidates = [
-        "data/df_weighted_10k.csv",
-        "data/저출산_소개팅_설문조사_확장_10000건_v2_합본.csv",
-        "data/저출산_소개팅_설문조사_시나리오추가_더미확장_10000rows_나의동물상추가.csv",
+        "../data/저출산_소개팅_설문조사_확장_10000건_v2_합본.csv"
     ]
     df = None
     for path in csv_candidates:
@@ -362,7 +383,7 @@ def load_and_preprocess_db():
     # 5) user_name을 인덱스로 설정 (Cell 11)
     if 'user_name' in df.columns:
         df.index = df['user_name']
-    df = df.fillna(method='ffill')  # 간단한 결측 처리
+    df = df.ffill()  # 간단한 결측 처리
 
     # 6) 원본 df 보관 (동물상, 이상형 등 메타 정보 조회용)
     df_raw = df.copy()
@@ -731,7 +752,7 @@ def load_animal_model():
     """
     model = models.resnet18(pretrained=True)
     num_ftrs = model.fc.in_features
-    model.fc = nn.Linear(num_ftrs, len(ANIMAL_EMOJI_MAP))   # 확인!
+    model.fc = nn.Linear(num_ftrs, len(ANIMAL_MODEL_CLASSES))   # 확인!
 
     try:
         model.load_state_dict(
@@ -813,7 +834,7 @@ class UserCheckResponse(BaseModel):
     message: str
 
 
-# --- 설문 요청 (새 데이터 명세) ---
+# --- 설문 요청 ---
 class SurveyRequest(BaseModel):
     session_id: str
 
