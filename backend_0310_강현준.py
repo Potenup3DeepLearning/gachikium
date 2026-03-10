@@ -921,7 +921,7 @@ def load_animal_pipeline():
     joblib 분류기 + InsightFace FaceAnalysis + recognition model 로드
     """
     try:
-        bundle = joblib.load("./models/animal_face_final.joblib")
+        bundle = joblib.load("./models/animal_face_final_final.joblib")
         pred_model = bundle["model"]
         pred_classes = bundle["classes"]
 
@@ -933,7 +933,7 @@ def load_animal_pipeline():
         if pred_rec is None:
             raise RuntimeError(f"recognition model not found. keys={list(pred_app.models.keys())}")
 
-        print("✅ animal_face_final.joblib 로드 완료")
+        print("✅ animal_face_final_final.joblib 로드 완료")
         return pred_model, pred_classes, pred_app, pred_rec
 
     except Exception as e:
