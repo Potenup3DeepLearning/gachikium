@@ -683,10 +683,10 @@ elif st.session_state.page == 'matching':
         d_col1, d_col2 = st.columns(2)
         with d_col1:
             
-            st.markdown(f"**이름:** {st.session_state.user_name}")
+            st.markdown(f"**이름:** {p['name']}")
             
             # 🎯 요청하신 형식: 동물상 : 🦊여우상(83%)
-            st.write(f"**동물상 :** {st.session_state.user_animal_result}({st.session_state.user_animal_prob})")
+            st.write(f"**동물상 :** {p['animal_type']}({p['similarity_score']})")
             
             st.markdown(f"**성향 태그:** {' '.join(p['tags'])}")
             match_icon = "✅" if comp.get('자녀계획_일치') else "❌"
@@ -698,9 +698,8 @@ elif st.session_state.page == 'matching':
             st.write(f"* 교육 열정: {p['education_passion']*100:.0f}%")
             # comp 데이터가 있을 때만 출력
             if comp:
-                st.write(f"* 양육관 유사도: {comp['양육관_유사도']*100:.0f}%")
-                st.write(f"* 교육관 유사도: {comp['교육관_유사도']*100:.0f}%")
-    
+                st.write(f"* 양육관 유사도: {comp['가치관_유사도']*100:.0f}%")
+                
 
     st.write("")
     if st.button("← 처음으로 돌아가기", key="back_to_home"):
