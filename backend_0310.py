@@ -436,17 +436,19 @@ def ensure_similarity_matrices():
 
 
 def register_new_user(user_name: str, survey_answers: Dict[str, Any],
-                      my_type: str = "") -> bool:
+                      my_type: str = "", photo_bytes: bytes = None) -> bool:
     """
     신규 유저의 설문 데이터를:
     1) 전역 df_db, df_features, df_mbti에 실시간 추가
-    2) 유사도 매트릭스 재계산
-    3) CSV에 영구 저장
+    2) 유사도 매트릭스 무효화 (매칭 시 자동 재계산)
+    3) CSV에 원본 형식으로 영구 저장
+    4) 사진을 data/photos/{유저이름}.jpg로 저장
 
     Parameters:
         user_name: 유저 이름
         survey_answers: 설문 응답 dict (SurveyRequest 필드 전체)
         my_type: AI 분석된 동물상 (예: "고양이상"). 없으면 빈 문자열.
+        photo_bytes: 유저 얼굴 사진 바이트 데이터. 없으면 None.
     """
     global df_db, df_features, df_mbti, val_sim_df, trait_sim_df
 
@@ -508,26 +510,57 @@ def register_new_user(user_name: str, survey_answers: Dict[str, Any],
         df_features = pd.concat([df_features, new_feature_row])
         df_mbti = pd.concat([df_mbti, new_mbti_letters])
 
-        # --- 7) 유사도 매트릭스 재계산 ---
-        ensure_similarity_matrices()
+        # --- 7) 유사도 매트릭스 무효화 (매칭 요청 시 자동 재계산) ---
+        val_sim_df = None
+        trait_sim_df = None
 
-        # --- 8) CSV에 영구 저장 ---
+        # --- 8) CSV에 원본 형식으로 영구 저장 ---
         if DB_CSV_PATH:
-            reverse_rename = {}
-            for old, new in RENAME_MAP.items():
-                reverse_rename[new] = old
-            for old, new in SCENARIO_RENAME.items():
-                reverse_rename[new] = old
-            for old, new in IMPORTANCE_RENAME_RAW.items():
-                reverse_rename[new] = old
-            save_row = new_df.rename(columns=reverse_rename)
-            if 'user_name' in save_row.columns and COL_NAME not in save_row.columns:
-                save_row = save_row.rename(columns={'user_name': COL_NAME})
-            if 'ideal_type' in save_row.columns and COL_IDEAL_TYPE not in save_row.columns:
-                save_row = save_row.rename(columns={'ideal_type': COL_IDEAL_TYPE})
-            if 'my_type' in save_row.columns and COL_ANIMAL not in save_row.columns:
-                save_row = save_row.rename(columns={'my_type': COL_ANIMAL})
-            save_row.to_csv(DB_CSV_PATH, mode='a', header=False, index=False)
+            from datetime import datetime
+            now_str = datetime.now().strftime("%Y/%m/%d %I:%M:%S %p GMT+9")
+
+            # 원본 CSV 컬럼 순서대로 행 구성 (Unnamed: 23 제외)
+            csv_row = {
+                '타임스탬프': now_str,
+                '0. 당신의 성함': user_name,
+                '0. 당신의 이상형': survey_answers.get('ideal_type', ''),
+                '0.1. 나의 동물상': my_type if my_type else '',
+                '1-1. 희망하는 자녀 수': survey_answers.get('p_children_count', ''),
+                '1-2. 희망하는 자녀 구성': survey_answers.get('p_children_composition', ''),
+                '1-3. 자녀 갖고 싶은 시기': survey_answers.get('p_children_timing', ''),
+                '1-4. 생물학적 출산이 어려움 발생 시 대안': survey_answers.get('p_infertility_alternative', ''),
+                '"1. 자녀 계획 및 가족 구성 항목"에 대해 중요도 ': int(survey_answers.get('imp_family_plan', 3)),
+                '아이가 "오늘만 양치 안하고 그냥 자면 안돼요? 라고 칭얼거릴 때 어떻게 하시겠습니까?  ': int(survey_answers.get('sc_toothbrushing', 3)),
+                '평소 밤 9시에 자기로 약속했습니다. 그런데 오늘 아이가 읽고 싶어 하던 동화책 시리즈의 마지막 권을 다 읽고 싶다며 30분만 더 시간을 달라고 합니다.': int(survey_answers.get('sc_bedtime_story', 3)),
+                '경쟁 상황에서의 태도 아이가 운동 경기나 대회에서 아쉽게 2등을 했습니다. 아이는 충분히 잘했다고 기뻐하는데, 당신의 마음속 생각은?': int(survey_answers.get('sc_competition_2nd', 3)),
+                '재능 발견과 교육 아이가 특정 분야(예: 피아노, 운동)에 천재적인 재능을 보입니다. 이때 당신의 교육 방향은?': int(survey_answers.get('sc_talent_education', 3)),
+                '두 사람의 훈육 방식이 부딪힐 때, 누구의 의견을 따라야 한다고 생각하시나요?': int(survey_answers.get('sc_discipline_conflict', 3)),
+                '한 명은 퇴근 후 아이와 놀아주고, 한 명은 밀린 집안일을 해야 하는 상황입니다.': int(survey_answers.get('sc_play_vs_chores', 3)),
+                '맞벌이 상황 등에서 조부모님이 아이를 봐주겠다고 제안하신다면?': int(survey_answers.get('sc_grandparents_help', 3)),
+                '양가 어르신들이 본인의 가치관과 다른 육아 조언(예: "애를 너무 손타게 키운다", "사탕 좀 주면 어떠냐")을 하실 때 당신의 생각은?': int(survey_answers.get('sc_inlaws_advice', 3)),
+                '주말에 아이와 동물원에 가기로 했는데, 아침에 일어나니 갑자기 비가 옵니다. 이때 당신의 반응은?': int(survey_answers.get('sc_rainy_zoo', 3)),
+                '아이의 교육 자금이나 미래 리스크를 대비하는 당신의 생각은?': int(survey_answers.get('sc_education_fund_risk', 3)),
+                '4-1. 자녀 교육비/양육비 지출 비중': survey_answers.get('e_childcare_cost_share', ''),
+                '4-2. 육아 휴직, 양육 부담': survey_answers.get('e_parental_leave_burden', ''),
+                '"4. 경제적 지원 및 가사 분담"에 대해 중요도 ': int(survey_answers.get('imp_econ_housework', 3)),
+                '5-1. 자녀 가치관, 어떤 사람이 되길 바라는가? ': survey_answers.get('child_values_open', ''),
+                '"5. 자녀 가치관"에 대해 중요도 ': int(survey_answers.get('imp_child_values', 3)),
+            }
+
+            save_df = pd.DataFrame([csv_row])
+            save_df.to_csv(DB_CSV_PATH, mode='a', header=False, index=False)
+            print(f"  💾 CSV 저장 완료: {DB_CSV_PATH}")
+
+        # --- 9) 사진 파일 저장 ---
+        if photo_bytes:
+            photo_dir = os.path.join(os.path.dirname(DB_CSV_PATH) if DB_CSV_PATH else "data", "photos")
+            os.makedirs(photo_dir, exist_ok=True)
+            # 파일명: 유저이름.jpg (특수문자 제거)
+            safe_name = re.sub(r'[\\/*?:"<>|]', '_', user_name.strip())
+            photo_path = os.path.join(photo_dir, f"{safe_name}.jpg")
+            with open(photo_path, 'wb') as f:
+                f.write(photo_bytes)
+            print(f"  📷 사진 저장 완료: {photo_path}")
 
         print(f"✅ 신규 유저 '{user_name}' 등록 완료 (DB: {len(df_db)}명, 피처: {len(df_features)}명)")
         return True
@@ -547,6 +580,10 @@ def get_similarity_recommendations(user_name: str, top_n: int = 20) -> pd.DataFr
 
     if df_features.empty or user_name not in df_features.index:
         return pd.DataFrame()
+
+    # 유사도 매트릭스가 없거나 크기가 맞지 않으면 재계산
+    if val_sim_df is None or len(val_sim_df) != len(df_features):
+        ensure_similarity_matrices()
 
     user_iloc = df_features.index.get_loc(user_name)
     # 동명이인 처리: get_loc이 slice나 array를 반환하면 첫 번째 사용
@@ -1456,7 +1493,10 @@ def submit_survey(request: SurveyRequest):
             if animal_result and animal_result != "미확인상" and animal_result != "❓ 미확인상":
                 my_type = get_animal_class_from_display(animal_result)
 
-            success = register_new_user(user_name, survey_answers, my_type)
+            success = register_new_user(
+                user_name, survey_answers, my_type,
+                photo_bytes=sessions[session_id].get("user_photo")
+            )
             if success:
                 print(f"✅ 신규 유저 '{user_name}' 매칭 준비 완료 (my_type={my_type})")
             else:
@@ -1903,6 +1943,64 @@ def get_animal_mapping():
         "all_animal_types": list(ANIMAL_EMOJI_MAP.keys()),
         "total_types": len(ANIMAL_EMOJI_MAP),
     }
+
+
+# ─────────────────────────────────────────────
+# 12. 유저 사진 조회/저장 API
+# ─────────────────────────────────────────────
+
+from fastapi.responses import FileResponse
+
+PHOTO_DIR = os.path.join("data", "photos")
+os.makedirs(PHOTO_DIR, exist_ok=True)
+
+
+@app.get("/api/user/photo/{user_name}", tags=["사진"])
+def get_user_photo(user_name: str):
+    """
+    유저 이름으로 저장된 사진 파일 반환.
+    저장 경로: data/photos/{유저이름}.jpg
+    사용법: GET /api/user/photo/강현준
+    """
+    safe_name = re.sub(r'[\\/*?:"<>|]', '_', user_name.strip())
+
+    # 여러 확장자 시도
+    for ext in ['jpg', 'jpeg', 'png']:
+        photo_path = os.path.join(PHOTO_DIR, f"{safe_name}.{ext}")
+        if os.path.exists(photo_path):
+            return FileResponse(photo_path, media_type=f"image/{ext}")
+
+    raise HTTPException(status_code=404, detail=f"'{user_name}'님의 사진을 찾을 수 없습니다.")
+
+
+@app.get("/api/user/photo/exists/{user_name}", tags=["사진"])
+def check_user_photo_exists(user_name: str):
+    """
+    유저 사진 존재 여부 확인.
+    """
+    safe_name = re.sub(r'[\\/*?:"<>|]', '_', user_name.strip())
+    for ext in ['jpg', 'jpeg', 'png']:
+        photo_path = os.path.join(PHOTO_DIR, f"{safe_name}.{ext}")
+        if os.path.exists(photo_path):
+            return {"exists": True, "path": photo_path, "user_name": user_name}
+    return {"exists": False, "user_name": user_name}
+
+
+@app.get("/api/user/photos", tags=["사진"])
+def list_user_photos():
+    """
+    저장된 모든 유저 사진 목록 반환.
+    """
+    if not os.path.exists(PHOTO_DIR):
+        return {"photos": [], "total": 0}
+
+    photos = []
+    for f in os.listdir(PHOTO_DIR):
+        if f.lower().endswith(('.jpg', '.jpeg', '.png')):
+            name = os.path.splitext(f)[0]
+            photos.append({"user_name": name, "filename": f})
+
+    return {"photos": photos, "total": len(photos)}
 
 
 # ─────────────────────────────────────────────
