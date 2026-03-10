@@ -29,6 +29,8 @@ dependencies = [
     "pydantic>=2.12.5",
     "pillow>=12.1.1",
     "optuna>=4.7.0",
+    "mtcnn>=1.0.0",
+    "mediapipe>=0.10.32",
 ]
 
 
