@@ -45,5 +45,19 @@ images/
 *.jpeg
 *.webp
 
-dataset/
-copy123.py
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# model / output
+*.pth
+runs/
