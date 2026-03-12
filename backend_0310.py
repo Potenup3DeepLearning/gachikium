@@ -319,7 +319,7 @@ def load_and_preprocess_db():
     """
      # 1) CSV 로드
     csv_candidates = [
-        "./data/저출산_소개팅_설문조사_확장_100건_0310_강현준.csv"
+        "./data/저출산_소개팅_설문조사_원본기준_증강_총100건_합본.csv"
     ]
     df = None
     for path in csv_candidates:
@@ -408,7 +408,7 @@ df_db, df_features, df_mbti, val_sim_df, trait_sim_df = load_and_preprocess_db()
 
 # CSV 저장 경로 (신규 유저 영구 저장용)
 DB_CSV_PATH = None
-for _p in ["./data/저출산_소개팅_설문조사_확장_100건_0310_강현준.csv"]:
+for _p in ["./data/저출산_소개팅_설문조사_원본기준_증강_총100건_합본.csv"]:
     if os.path.exists(_p):
         DB_CSV_PATH = _p
         break
